@@ -12,18 +12,14 @@
 
 ## 1. Executive Summary
 
-Oculus is a lightweight, high-performance monitoring and observability
-system. It bridges the gap between traditional infrastructure monitoring
-(like Prometheus) and financial market tracking (like TradingView).
+Oculus is a lightweight, high-performance monitoring and observability system. It bridges the gap between traditional infrastructure monitoring (like Prometheus) and financial market tracking (like TradingView).
 
 **v0.1.0 Goals:**
 
 - Validate the "Rust + DuckDB + HTMX" tech stack
 - Build a zero-dependency single binary application
-- Complete the data pipeline:
-  Collection → Persistence → [Rule Engine] → Real-time Web Display
-- Explicitly **out of scope** for v0.1.0: any user/account/role management;
-  single-tenant with one static token only.
+- Complete the data pipeline: Collection → Persistence → [Rule Engine] → Real-time Web Display
+- Explicitly **out of scope** for v0.1.0: any user/account/role management; single-tenant with one static token only.
 
 ---
 

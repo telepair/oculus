@@ -34,8 +34,7 @@ Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Presentation/
     └─ Custom Collectors                                               └─ Slack
 ```
 
-> 📖 See [PRD](docs/PRD.md) for detailed logical architecture and component
-> overview.
+> 📖 See [PRD](docs/PRD.md) for detailed logical architecture and component overview.
 
 ## Tech Stack
 
@@ -130,7 +129,9 @@ oculus/
 │   ├── lib.rs           # Library: shared core functionality
 │   └── main.rs          # Binary: runs complete system
 ├── docs/
-│   └── PRD.md           # Product Requirements Document
+│   ├── PRD.md           # Product Requirements Document
+│   ├── lib.md           # Library Integration Guide
+│   └── schema.md        # Database Schema Reference
 ├── Cargo.toml           # Rust dependencies
 ├── Makefile             # Build automation
 └── LICENSE              # MIT License
@@ -178,10 +179,10 @@ cargo run --bin oculus
 
 ### Storage Layer
 
-- [ ] DuckDB integration with single-writer actor model
-- [ ] `metrics` table schema and migrations
-- [ ] `events` table for alerts/audit (optional)
-- [ ] Data retention and cleanup policy (7-day window)
+- [x] DuckDB integration with single-writer actor model
+- [x] `metrics` table schema and migrations
+- [x] `events` table for alerts/audit
+- [x] Data retention and cleanup policy (7-day window)
 
 ### Rule Engine
 

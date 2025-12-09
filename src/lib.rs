@@ -7,33 +7,47 @@
 //! # Architecture
 //!
 //! - **Collectors**: Data collection from various sources (network, crypto, stock, prediction markets)
-//! - **Storage**: DuckDB-based persistence layer
+//! - **Storage**: DuckDB-based persistence layer with read/write separation
 //! - **Rule Engine**: Simple (YAML) and complex (SQL) rule evaluation
 //! - **Presentation**: Web UI and REST API
 //! - **Notification**: Multi-channel alert delivery
 //!
-//! # Example
+//! # Quick Start
 //!
-//! ```rust,ignore
-//! use oculus::{Collector, RuleEngine, Storage};
+//! ```rust,no_run
+//! use oculus::{StorageBuilder, Metric};
+//! use chrono::Utc;
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let storage = Storage::new("./oculus.db").await?;
-//!     let collector = Collector::new(storage.clone());
-//!     let engine = RuleEngine::new(storage);
-//!     
-//!     // Start data collection and rule evaluation
-//!     collector.start().await?;
-//!     engine.start().await?;
-//!     
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Build storage layer (spawns writer actor thread)
+//!     let handles = StorageBuilder::new("./oculus.db")
+//!         .pool_size(4)
+//!         .build()?;
+//!
+//!     // Insert a metric (sent to writer via MPSC channel)
+//!     let metric = Metric {
+//!         ts: Utc::now(),
+//!         category: "test".to_string(),
+//!         symbol: "test.metric".to_string(),
+//!         value: 42.0,
+//!         tags: None,
+//!     };
+//!     handles.metric_writer.insert(metric)?;
+//!
+//!     // Query metrics (via read pool)
+//!     let results = handles.metric_reader.query(Default::default())?;
+//!     println!("Found {} metrics", results.len());
+//!
+//!     // Graceful shutdown
+//!     handles.shutdown()?;
 //!     Ok(())
 //! }
 //! ```
 
-// TODO: Implement core modules
-// pub mod collector;
-// pub mod storage;
-// pub mod rule_engine;
-// pub mod presentation;
-// pub mod notification;
+pub mod storage;
+
+// Re-export public types
+pub use storage::{
+    Event, EventReader, EventType, EventWriter, Metric, MetricReader, MetricWriter, RawSqlReader,
+    Severity, StorageAdmin, StorageBuilder, StorageError, StorageHandles,
+};

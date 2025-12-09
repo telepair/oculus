@@ -1,0 +1,30 @@
+//! Storage-specific error types.
+//!
+//! All storage operations return [`StorageError`] on failure, which can be
+//! matched to determine the underlying cause (database, pool, channel, etc.).
+
+use thiserror::Error;
+
+/// Errors that can occur in the storage layer.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// Database operation failed.
+    #[error("database error: {0}")]
+    Database(#[from] duckdb::Error),
+
+    /// Connection pool error.
+    #[error("pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+
+    /// Failed to send command to writer actor.
+    #[error("failed to send command to writer actor")]
+    ChannelSend,
+
+    /// JSON serialization/deserialization error.
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Internal error (e.g., task join failure).
+    #[error("internal error: {0}")]
+    Internal(String),
+}
