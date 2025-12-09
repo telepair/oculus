@@ -1,0 +1,16 @@
+[package]
+name = "oculus"
+version = "0.1.0"
+edition = "2024"
+description = "Unified telemetry system for monitoring and observability"
+license = "MIT"
+
+[lib]
+name = "oculus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oculus"
+path = "src/main.rs"
+
+[dependencies]

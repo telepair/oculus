@@ -1,0 +1,23 @@
+# Rust
+/target
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+*.profraw
+*.profdata
+
+# Claude
+.claude/
+
+# Tailwind
+templates/static/tailwind.css
