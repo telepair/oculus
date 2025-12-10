@@ -12,7 +12,7 @@ use duckdb::Connection;
 
 use crate::storage::StorageError;
 use crate::storage::schema::init_schema;
-use crate::storage::types::{Event, Metric};
+use crate::storage::{Event, Metric};
 
 /// Commands sent to the writer actor.
 #[derive(Debug)]
@@ -71,37 +71,44 @@ impl DbActor {
             match cmd {
                 Command::InsertMetric(metric) => {
                     if let Err(e) = self.insert_metrics_batch(&[metric]) {
-                        tracing::error!("Failed to insert metric: {e}");
+                        tracing::error!("Failed to insert metric");
+                        tracing::debug!("Metric insertion error: {e}");
                     }
                 }
                 Command::InsertMetrics(metrics) => {
                     if let Err(e) = self.insert_metrics_batch(&metrics) {
-                        tracing::error!("Failed to insert metrics batch: {e}");
+                        tracing::error!("Failed to insert metrics batch");
+                        tracing::debug!("Metrics batch insertion error: {e}");
                     }
                 }
                 Command::InsertEvent(event) => {
                     if let Err(e) = self.insert_events_batch(&[event]) {
-                        tracing::error!("Failed to insert event: {e}");
+                        tracing::error!("Failed to insert event");
+                        tracing::debug!("Event insertion error: {e}");
                     }
                 }
                 Command::InsertEvents(events) => {
                     if let Err(e) = self.insert_events_batch(&events) {
-                        tracing::error!("Failed to insert events batch: {e}");
+                        tracing::error!("Failed to insert events batch");
+                        tracing::debug!("Events batch insertion error: {e}");
                     }
                 }
                 Command::CleanupMetrics { retention_days } => {
                     if let Err(e) = self.cleanup_metrics(retention_days) {
-                        tracing::error!("Failed to cleanup metrics: {e}");
+                        tracing::error!("Failed to cleanup metrics");
+                        tracing::debug!("Metrics cleanup error: {e}");
                     }
                 }
                 Command::CleanupEvents { retention_days } => {
                     if let Err(e) = self.cleanup_events(retention_days) {
-                        tracing::error!("Failed to cleanup events: {e}");
+                        tracing::error!("Failed to cleanup events");
+                        tracing::debug!("Events cleanup error: {e}");
                     }
                 }
                 Command::Checkpoint => {
                     if let Err(e) = self.checkpoint() {
-                        tracing::error!("Failed to checkpoint: {e}");
+                        tracing::error!("Failed to checkpoint");
+                        tracing::debug!("Checkpoint error: {e}");
                     }
                 }
                 Command::Shutdown => {
@@ -130,17 +137,18 @@ impl DbActor {
                 m.value,
                 tags_json,
             ])?;
+            tracing::debug!("Inserted metric: {m:?}");
         }
 
         appender.flush()?;
-        tracing::debug!("Inserted {} metrics", metrics.len());
+        tracing::debug!("Flushed metrics");
         Ok(())
     }
 
     /// Insert events using prepared statement (Appender has issues with ENUM types).
     fn insert_events_batch(&self, events: &[Event]) -> Result<(), StorageError> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO events (ts, source, type, severity, message, payload) \
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO events (ts, source, kind, severity, message, payload) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )?;
 
@@ -150,14 +158,14 @@ impl DbActor {
             stmt.execute(duckdb::params![
                 ts_micros,
                 &e.source,
-                e.event_type.as_str(),
-                e.severity.as_str(),
+                e.kind.as_ref(),
+                e.severity.as_ref(),
                 &e.message,
                 payload_json,
             ])?;
+            tracing::debug!("Inserted event: {e:?}");
         }
 
-        tracing::debug!("Inserted {} events", events.len());
         Ok(())
     }
 
@@ -198,7 +206,7 @@ impl DbActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::types::{EventType, Severity};
+    use crate::storage::types::{EventKind, EventSeverity};
     use tempfile::tempdir;
 
     #[test]
@@ -255,8 +263,8 @@ mod tests {
             id: None,
             ts: Utc::now(),
             source: "test.actor".to_string(),
-            event_type: EventType::System,
-            severity: Severity::Info,
+            kind: EventKind::System,
+            severity: EventSeverity::Info,
             message: "Actor test event".to_string(),
             payload: Some(serde_json::json!({"test": true})),
         };
@@ -293,8 +301,8 @@ mod tests {
                 id: None,
                 ts: Utc::now(),
                 source: format!("batch.source.{i}"),
-                event_type: EventType::Alert,
-                severity: Severity::Warn,
+                kind: EventKind::Alert,
+                severity: EventSeverity::Warn,
                 message: format!("Batch event {i}"),
                 payload: None,
             })
@@ -376,8 +384,8 @@ mod tests {
             id: None,
             ts: old_ts,
             source: "old.source".to_string(),
-            event_type: EventType::System,
-            severity: Severity::Info,
+            kind: EventKind::System,
+            severity: EventSeverity::Info,
             message: "Old event".to_string(),
             payload: None,
         };
@@ -388,8 +396,8 @@ mod tests {
             id: None,
             ts: Utc::now(),
             source: "new.source".to_string(),
-            event_type: EventType::Alert,
-            severity: Severity::Critical,
+            kind: EventKind::Alert,
+            severity: EventSeverity::Critical,
             message: "New event".to_string(),
             payload: None,
         };

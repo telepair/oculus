@@ -25,8 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .channel_capacity(1024) // Writer command queue size
         .build()?;
 
-    // Insert metrics via writer facade
-    handles.metric_writer.insert(Metric {
+    // Insert metrics via unified writer facade
+    handles.writer.insert_metric(Metric {
         ts: Utc::now(),
         category: "custom".to_string(),
         symbol: "my.metric".to_string(),
@@ -49,12 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API Overview
 
-### Writers (MPSC Channel → Single Writer Thread)
+### Writer (MPSC Channel → Single Writer Thread)
 
 | Facade | Methods | Description |
 |--------|---------|-------------|
-| `MetricWriter` | `insert()`, `insert_batch()` | Write metrics |
-| `EventWriter` | `insert()`, `insert_batch()` | Write events |
+| `StorageWriter` | `insert_metric()`, `insert_metrics()` | Write metrics |
+| | `insert_event()`, `insert_events()` | Write events |
 
 ### Readers (r2d2 Connection Pool)
 
@@ -98,7 +98,7 @@ All operations return `Result<T, StorageError>`:
 ```rust
 use oculus::StorageError;
 
-match handles.metric_writer.insert(metric) {
+match handles.writer.insert_metric(metric) {
     Ok(()) => println!("Inserted"),
     Err(StorageError::ChannelSend) => eprintln!("Writer actor not running"),
     Err(StorageError::Database(e)) => eprintln!("DuckDB error: {e}"),
@@ -110,9 +110,9 @@ match handles.metric_writer.insert(metric) {
 
 ```text
 ┌──────────────────┐     MPSC Channel     ┌──────────────────┐
-│  MetricWriter    │ ──────────────────▶  │    DbActor       │
-│  EventWriter     │                      │  (Single Writer) │
-│  StorageAdmin    │                      │                  │
+│  StorageWriter   │ ──────────────────▶  │    DbActor       │
+│  StorageAdmin    │                      │  (Single Writer) │
+│                  │                      │                  │
 └──────────────────┘                      └────────┬─────────┘
                                                    │
                                                    ▼

@@ -27,4 +27,8 @@ pub enum StorageError {
     /// Internal error (e.g., task join failure).
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Invalid data in database (e.g., unknown enum value).
+    #[error("invalid data: {0}")]
+    InvalidData(String),
 }

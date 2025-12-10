@@ -19,7 +19,7 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 - Validate the "Rust + DuckDB + HTMX" tech stack
 - Build a zero-dependency single binary application
 - Complete the data pipeline: Collection → Persistence → [Rule Engine] → Real-time Web Display
-- Explicitly **out of scope** for v0.1.0: any user/account/role management; single-tenant with one static token only.
+- Explicitly **out of scope** for v0.1.0: any user/account/role management.
 
 ---
 

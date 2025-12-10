@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::storage::StorageError;
 use crate::storage::actor::Command;
 use crate::storage::pool::ReadPool;
-use crate::storage::types::{Event, EventType, Metric, Severity};
+use crate::storage::{Event, EventKind, EventSeverity, Metric};
 
 // =============================================================================
 // Query Types
@@ -102,10 +102,10 @@ pub struct EventQuery {
     pub end: Option<DateTime<Utc>>,
     /// Source filter.
     pub source: Option<String>,
-    /// Event type filter.
-    pub event_type: Option<EventType>,
-    /// Severity filter.
-    pub severity: Option<Severity>,
+    /// Event kind filter.
+    pub kind: Option<EventKind>,
+    /// Event severity filter.
+    pub severity: Option<EventSeverity>,
     /// Maximum number of results (default: 100, max: 10,000).
     pub limit: Option<u32>,
     /// Sort order (default: Desc).
@@ -116,56 +116,61 @@ pub struct EventQuery {
 // Writers
 // =============================================================================
 
-/// Facade for writing metrics.
+/// Facade for writing metrics and events.
+///
+/// # Non-blocking Behavior
+///
+/// All insertion methods (`insert_metric`, `insert_metrics`, `insert_event`, `insert_events`)
+/// use non-blocking channel sends via `try_send`. If the internal command channel is full,
+/// these methods will return `StorageError::ChannelSend` immediately without blocking.
+///
+/// **Data Loss**: In high-load scenarios, if the channel is full, data will be dropped.
+/// Callers should handle `ChannelSend` errors appropriately based on their requirements,
+/// such as logging warnings or implementing application-level backpressure.
+///
+/// This design prioritizes system responsiveness over guaranteed delivery for observability data.
 #[derive(Clone)]
-pub struct MetricWriter {
+pub struct StorageWriter {
     tx: SyncSender<Command>,
 }
 
-impl MetricWriter {
+impl std::fmt::Debug for StorageWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageWriter").finish_non_exhaustive()
+    }
+}
+
+impl StorageWriter {
     /// Create a new metric writer.
     pub(crate) fn new(tx: SyncSender<Command>) -> Self {
         Self { tx }
     }
 
     /// Insert a single metric.
-    pub fn insert(&self, metric: Metric) -> Result<(), StorageError> {
+    pub fn insert_metric(&self, metric: Metric) -> Result<(), StorageError> {
         self.tx
-            .send(Command::InsertMetric(metric))
+            .try_send(Command::InsertMetric(metric))
             .map_err(|_| StorageError::ChannelSend)
     }
 
     /// Insert a batch of metrics.
-    pub fn insert_batch(&self, metrics: Vec<Metric>) -> Result<(), StorageError> {
+    pub fn insert_metrics(&self, metrics: Vec<Metric>) -> Result<(), StorageError> {
         self.tx
-            .send(Command::InsertMetrics(metrics))
+            .try_send(Command::InsertMetrics(metrics))
             .map_err(|_| StorageError::ChannelSend)
-    }
-}
-
-/// Facade for writing events.
-#[derive(Clone)]
-pub struct EventWriter {
-    tx: SyncSender<Command>,
-}
-
-impl EventWriter {
-    /// Create a new event writer.
-    pub(crate) fn new(tx: SyncSender<Command>) -> Self {
-        Self { tx }
     }
 
     /// Insert a single event.
-    pub fn insert(&self, event: Event) -> Result<(), StorageError> {
+    pub fn insert_event(&self, event: Event) -> Result<(), StorageError> {
         self.tx
-            .send(Command::InsertEvent(event))
+            .try_send(Command::InsertEvent(event))
             .map_err(|_| StorageError::ChannelSend)
     }
 
     /// Insert a batch of events.
-    pub fn insert_batch(&self, events: Vec<Event>) -> Result<(), StorageError> {
+    pub fn insert_events(&self, events: Vec<Event>) -> Result<(), StorageError> {
         self.tx
-            .send(Command::InsertEvents(events))
+            .try_send(Command::InsertEvents(events))
             .map_err(|_| StorageError::ChannelSend)
     }
 }
@@ -178,6 +183,12 @@ impl EventWriter {
 #[derive(Clone)]
 pub struct MetricReader {
     pool: Arc<ReadPool>,
+}
+
+impl std::fmt::Debug for MetricReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricReader").finish_non_exhaustive()
+    }
 }
 
 impl MetricReader {
@@ -207,27 +218,31 @@ impl MetricReader {
         let effective_limit = q.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
         let effective_order = q.order.unwrap_or_default();
 
-        let mut sql =
-            String::from("SELECT ts, category, symbol, value, tags FROM metrics WHERE 1=1");
+        let mut parts = vec![
+            "SELECT ts, category, symbol, value, tags FROM metrics WHERE 1=1",
+            "AND ts >= ?",
+            "AND ts <= ?",
+        ];
         let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-
-        sql.push_str(" AND ts >= ?");
         params.push(Box::new(effective_start.timestamp_micros()));
-
-        sql.push_str(" AND ts <= ?");
         params.push(Box::new(effective_end.timestamp_micros()));
 
         if let Some(ref c) = q.category {
-            sql.push_str(" AND category = ?");
+            parts.push("AND category = ?");
             params.push(Box::new(c.clone()));
         }
         if let Some(ref s) = q.symbol {
-            sql.push_str(" AND symbol = ?");
+            parts.push("AND symbol = ?");
             params.push(Box::new(s.clone()));
         }
 
-        sql.push_str(&format!(" ORDER BY ts {}", effective_order.as_sql()));
-        sql.push_str(&format!(" LIMIT {effective_limit}"));
+        let order_clause = format!("ORDER BY ts {}", effective_order.as_sql());
+        parts.push(&order_clause);
+
+        let limit_clause = format!("LIMIT {effective_limit}");
+        parts.push(&limit_clause);
+
+        let sql = parts.join(" ");
 
         let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
@@ -263,6 +278,12 @@ pub struct EventReader {
     pool: Arc<ReadPool>,
 }
 
+impl std::fmt::Debug for EventReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventReader").finish_non_exhaustive()
+    }
+}
+
 impl EventReader {
     /// Create a new event reader.
     pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
@@ -291,32 +312,35 @@ impl EventReader {
         let effective_order = q.order.unwrap_or_default();
 
         // Cast ENUM columns to VARCHAR for Rust driver compatibility
-        let mut sql = String::from(
-            "SELECT id, ts, source, type::VARCHAR, severity::VARCHAR, message, payload FROM events WHERE 1=1",
-        );
+        let mut parts = vec![
+            "SELECT id, ts, source, kind::VARCHAR, severity::VARCHAR, message, payload FROM events WHERE 1=1",
+            "AND ts >= ?",
+            "AND ts <= ?",
+        ];
         let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-
-        sql.push_str(" AND ts >= ?");
         params.push(Box::new(effective_start.timestamp_micros()));
-
-        sql.push_str(" AND ts <= ?");
         params.push(Box::new(effective_end.timestamp_micros()));
 
         if let Some(ref s) = q.source {
-            sql.push_str(" AND source = ?");
+            parts.push("AND source = ?");
             params.push(Box::new(s.clone()));
         }
-        if let Some(t) = q.event_type {
-            sql.push_str(" AND type = ?");
-            params.push(Box::new(t.as_str().to_string()));
+        if let Some(t) = q.kind {
+            parts.push("AND kind = ?");
+            params.push(Box::new(t.as_ref().to_string()));
         }
         if let Some(s) = q.severity {
-            sql.push_str(" AND severity = ?");
-            params.push(Box::new(s.as_str().to_string()));
+            parts.push("AND severity = ?");
+            params.push(Box::new(s.as_ref().to_string()));
         }
 
-        sql.push_str(&format!(" ORDER BY ts {}", effective_order.as_sql()));
-        sql.push_str(&format!(" LIMIT {effective_limit}"));
+        let order_clause = format!("ORDER BY ts {}", effective_order.as_sql());
+        parts.push(&order_clause);
+
+        let limit_clause = format!("LIMIT {effective_limit}");
+        parts.push(&limit_clause);
+
+        let sql = parts.join(" ");
 
         let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
@@ -325,18 +349,28 @@ impl EventReader {
             let ts_micros: i64 = row.get(1)?;
             let ts = DateTime::from_timestamp_micros(ts_micros).unwrap_or(DateTime::UNIX_EPOCH);
             let source: String = row.get(2)?;
-            let type_str: String = row.get(3)?;
+            let kind_str: String = row.get(3)?;
             let severity_str: String = row.get(4)?;
             let message: String = row.get(5)?;
             let payload_str: Option<String> = row.get(6)?;
             let payload = payload_str.and_then(|s| serde_json::from_str(&s).ok());
 
+            // Parse enum values with fallback and logging for unexpected data
+            let kind = EventKind::from_str(&kind_str).unwrap_or_else(|_| {
+                tracing::warn!(kind = %kind_str, "Unknown EventKind in database, defaulting to System");
+                EventKind::System
+            });
+            let severity = EventSeverity::from_str(&severity_str).unwrap_or_else(|_| {
+                tracing::warn!(severity = %severity_str, "Unknown EventSeverity in database, defaulting to Info");
+                EventSeverity::Info
+            });
+
             Ok(Event {
                 id,
                 ts,
                 source,
-                event_type: EventType::from_str(&type_str).unwrap_or(EventType::System),
-                severity: Severity::from_str(&severity_str).unwrap_or(Severity::Info),
+                kind,
+                severity,
                 message,
                 payload,
             })
@@ -356,6 +390,12 @@ pub struct RawSqlReader {
     pool: Arc<ReadPool>,
 }
 
+impl std::fmt::Debug for RawSqlReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawSqlReader").finish_non_exhaustive()
+    }
+}
+
 impl RawSqlReader {
     /// Create a new raw SQL reader.
     pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
@@ -364,13 +404,41 @@ impl RawSqlReader {
 
     /// Execute a raw SQL query and return results as key-value maps.
     ///
+    /// # Security
+    ///
+    /// Only single `SELECT` statements are allowed. Multiple statements (separated by `;`)
+    /// and non-SELECT operations are rejected to mitigate SQL injection and DoS risks.
+    ///
     /// Column names are extracted by wrapping the query in a DESCRIBE statement.
     pub fn execute(&self, sql: &str) -> Result<Vec<HashMap<String, Value>>, StorageError> {
+        let trimmed = sql.trim();
+
+        // Detect multiple statements before normalization to prevent bypass
+        if trimmed.matches(';').count() > 1
+            || (trimmed.contains(';')
+                && !trimmed.trim_end_matches(';').trim().is_empty()
+                && trimmed.trim_end_matches(';').trim().contains(';'))
+        {
+            return Err(StorageError::InvalidData(
+                "multiple statements are not allowed in raw SQL reader".to_string(),
+            ));
+        }
+
+        let normalized = trimmed.trim_end_matches(';').trim();
+        let lowered = normalized.to_ascii_lowercase();
+
+        // Restrict to single read-only SELECT statement
+        if !lowered.starts_with("select") {
+            return Err(StorageError::InvalidData(
+                "raw SQL reader only allows SELECT statements".to_string(),
+            ));
+        }
+
         let conn = self.pool.get()?;
 
         // Get column names by wrapping query in a subquery and using DESCRIBE
         // This is a workaround for DuckDB 1.4.2's column_name API requiring execution
-        let describe_sql = format!("DESCRIBE SELECT * FROM ({sql}) AS _q");
+        let describe_sql = format!("DESCRIBE SELECT * FROM ({normalized}) AS _q");
         let column_names: Vec<String> = {
             let mut desc_stmt = conn.prepare(&describe_sql)?;
             let mut desc_rows = desc_stmt.query([])?;
@@ -382,7 +450,7 @@ impl RawSqlReader {
             names
         };
 
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(normalized)?;
         let mut rows_iter = stmt.query([])?;
         let mut results = Vec::new();
 
@@ -422,6 +490,12 @@ pub struct StorageAdmin {
     tx: SyncSender<Command>,
 }
 
+impl std::fmt::Debug for StorageAdmin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageAdmin").finish_non_exhaustive()
+    }
+}
+
 impl StorageAdmin {
     /// Create a new storage admin.
     pub(crate) fn new(tx: SyncSender<Command>) -> Self {
@@ -431,28 +505,28 @@ impl StorageAdmin {
     /// Delete metrics older than retention_days.
     pub fn cleanup_metrics(&self, retention_days: u32) -> Result<(), StorageError> {
         self.tx
-            .send(Command::CleanupMetrics { retention_days })
+            .try_send(Command::CleanupMetrics { retention_days })
             .map_err(|_| StorageError::ChannelSend)
     }
 
     /// Delete events older than retention_days.
     pub fn cleanup_events(&self, retention_days: u32) -> Result<(), StorageError> {
         self.tx
-            .send(Command::CleanupEvents { retention_days })
+            .try_send(Command::CleanupEvents { retention_days })
             .map_err(|_| StorageError::ChannelSend)
     }
 
     /// Force WAL checkpoint for read visibility.
     pub fn checkpoint(&self) -> Result<(), StorageError> {
         self.tx
-            .send(Command::Checkpoint)
+            .try_send(Command::Checkpoint)
             .map_err(|_| StorageError::ChannelSend)
     }
 
     /// Graceful shutdown of the writer actor.
     pub fn shutdown(&self) -> Result<(), StorageError> {
         self.tx
-            .send(Command::Shutdown)
+            .try_send(Command::Shutdown)
             .map_err(|_| StorageError::ChannelSend)
     }
 }
@@ -473,7 +547,7 @@ mod tests {
         let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
 
         // Create facades
-        let writer = MetricWriter::new(tx.clone());
+        let writer = StorageWriter::new(tx.clone());
         let admin = StorageAdmin::new(tx);
 
         // Write metric
@@ -484,7 +558,7 @@ mod tests {
             value: 42.0,
             tags: None,
         };
-        writer.insert(metric).unwrap();
+        writer.insert_metric(metric).unwrap();
 
         // Checkpoint and shutdown
         admin.checkpoint().unwrap();
@@ -508,19 +582,19 @@ mod tests {
         // Phase 1: Write events
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = EventWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let event = Event {
                 id: None,
                 ts: Utc::now(),
                 source: "test.source".to_string(),
-                event_type: EventType::Alert,
-                severity: Severity::Warn,
+                kind: EventKind::Alert,
+                severity: EventSeverity::Warn,
                 message: "Test alert message".to_string(),
                 payload: Some(serde_json::json!({"key": "value"})),
             };
-            writer.insert(event).unwrap();
+            writer.insert_event(event).unwrap();
 
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
@@ -534,8 +608,8 @@ mod tests {
         let results = reader.query(EventQuery::default()).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source, "test.source");
-        assert_eq!(results[0].event_type, EventType::Alert);
-        assert_eq!(results[0].severity, Severity::Warn);
+        assert_eq!(results[0].kind, EventKind::Alert);
+        assert_eq!(results[0].severity, EventSeverity::Warn);
         assert!(results[0].id.is_some());
     }
 
@@ -546,7 +620,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = EventWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let events: Vec<Event> = (0..5)
@@ -554,14 +628,14 @@ mod tests {
                     id: None,
                     ts: Utc::now(),
                     source: format!("source.{i}"),
-                    event_type: EventType::System,
-                    severity: Severity::Info,
+                    kind: EventKind::System,
+                    severity: EventSeverity::Info,
                     message: format!("Event {i}"),
                     payload: None,
                 })
                 .collect();
 
-            writer.insert_batch(events).unwrap();
+            writer.insert_events(events).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -580,7 +654,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             for i in 0..3 {
@@ -591,7 +665,7 @@ mod tests {
                     value: f64::from(i * 10),
                     tags: None,
                 };
-                writer.insert(metric).unwrap();
+                writer.insert_metric(metric).unwrap();
             }
 
             admin.checkpoint().unwrap();
@@ -626,7 +700,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             // Insert metrics with different categories and symbols
@@ -653,7 +727,7 @@ mod tests {
                     tags: None,
                 },
             ];
-            writer.insert_batch(metrics).unwrap();
+            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -689,7 +763,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = EventWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let events = vec![
@@ -697,8 +771,8 @@ mod tests {
                     id: None,
                     ts: Utc::now(),
                     source: "rule.btc".to_string(),
-                    event_type: EventType::Alert,
-                    severity: Severity::Critical,
+                    kind: EventKind::Alert,
+                    severity: EventSeverity::Critical,
                     message: "BTC alert".to_string(),
                     payload: None,
                 },
@@ -706,8 +780,8 @@ mod tests {
                     id: None,
                     ts: Utc::now(),
                     source: "collector.net".to_string(),
-                    event_type: EventType::Error,
-                    severity: Severity::Error,
+                    kind: EventKind::Error,
+                    severity: EventSeverity::Error,
                     message: "Network error".to_string(),
                     payload: None,
                 },
@@ -715,13 +789,13 @@ mod tests {
                     id: None,
                     ts: Utc::now(),
                     source: "system".to_string(),
-                    event_type: EventType::System,
-                    severity: Severity::Info,
+                    kind: EventKind::System,
+                    severity: EventSeverity::Info,
                     message: "System startup".to_string(),
                     payload: None,
                 },
             ];
-            writer.insert_batch(events).unwrap();
+            writer.insert_events(events).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -743,7 +817,7 @@ mod tests {
         // Test event_type filter
         let results = reader
             .query(EventQuery {
-                event_type: Some(EventType::Error),
+                kind: Some(EventKind::Error),
                 ..Default::default()
             })
             .unwrap();
@@ -753,7 +827,7 @@ mod tests {
         // Test severity filter
         let results = reader
             .query(EventQuery {
-                severity: Some(Severity::Critical),
+                severity: Some(EventSeverity::Critical),
                 ..Default::default()
             })
             .unwrap();
@@ -767,7 +841,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             // Insert metrics at different times
@@ -795,7 +869,7 @@ mod tests {
                     tags: None,
                 },
             ];
-            writer.insert_batch(metrics).unwrap();
+            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -834,7 +908,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             // Insert more than the default limit but less than max
@@ -847,7 +921,7 @@ mod tests {
                     tags: None,
                 })
                 .collect();
-            writer.insert_batch(metrics).unwrap();
+            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -895,7 +969,7 @@ mod tests {
 
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let metrics = vec![
@@ -921,7 +995,7 @@ mod tests {
                     tags: None,
                 },
             ];
-            writer.insert_batch(metrics).unwrap();
+            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();

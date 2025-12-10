@@ -9,10 +9,8 @@ use std::thread::JoinHandle;
 
 use crate::storage::StorageError;
 use crate::storage::actor::DbActor;
-use crate::storage::facades::{
-    EventReader, EventWriter, MetricReader, MetricWriter, RawSqlReader, StorageAdmin,
-};
 use crate::storage::pool::ReadPool;
+use crate::storage::{EventReader, MetricReader, RawSqlReader, StorageAdmin, StorageWriter};
 
 /// Default channel capacity for writer commands.
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
@@ -58,8 +56,7 @@ impl StorageBuilder {
         let pool = ReadPool::new(&self.db_path, self.pool_size)?;
 
         Ok(StorageHandles {
-            metric_writer: MetricWriter::new(tx.clone()),
-            event_writer: EventWriter::new(tx.clone()),
+            writer: StorageWriter::new(tx.clone()),
             metric_reader: MetricReader::new(Arc::clone(&pool)),
             event_reader: EventReader::new(Arc::clone(&pool)),
             raw_sql_reader: RawSqlReader::new(pool),
@@ -71,10 +68,8 @@ impl StorageBuilder {
 
 /// Handles to all storage layer facades.
 pub struct StorageHandles {
-    /// Facade for writing metrics.
-    pub metric_writer: MetricWriter,
-    /// Facade for writing events.
-    pub event_writer: EventWriter,
+    /// Unified writer facade for metrics and events.
+    pub writer: StorageWriter,
     /// Facade for reading metrics.
     pub metric_reader: MetricReader,
     /// Facade for reading events.
@@ -127,7 +122,7 @@ mod tests {
     #[test]
     fn test_storage_builder() {
         use crate::storage::actor::DbActor;
-        use crate::storage::facades::{MetricWriter, StorageAdmin};
+        use crate::storage::facades::{StorageAdmin, StorageWriter};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -135,7 +130,7 @@ mod tests {
         // Phase 1: Write using actor directly (no ReadPool during write)
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let metric = Metric {
@@ -145,7 +140,7 @@ mod tests {
                 value: 123.0,
                 tags: None,
             };
-            writer.insert(metric).unwrap();
+            writer.insert_metric(metric).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -170,7 +165,7 @@ mod tests {
     #[test]
     fn test_storage_roundtrip() {
         use crate::storage::actor::DbActor;
-        use crate::storage::facades::{MetricWriter, StorageAdmin};
+        use crate::storage::facades::{StorageAdmin, StorageWriter};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("roundtrip.db");
@@ -178,7 +173,7 @@ mod tests {
         // Phase 1: Write using actor directly
         {
             let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-            let writer = MetricWriter::new(tx.clone());
+            let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
             let metrics: Vec<Metric> = (0..5)
@@ -191,7 +186,7 @@ mod tests {
                 })
                 .collect();
 
-            writer.insert_batch(metrics).unwrap();
+            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();

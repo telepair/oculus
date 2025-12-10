@@ -7,10 +7,9 @@
 //! - [`EventType`]: Classification of event nature/handling
 //! - [`Severity`]: Priority levels for event delivery
 
-use std::str::FromStr;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use strum_macros::{AsRefStr, Display, EnumString};
 
 /// A metric data point stored in the `metrics` table.
 ///
@@ -61,21 +60,24 @@ pub struct Event {
     /// Event origin (e.g., "rule.btc_alert", "collector.network").
     pub source: String,
     /// Event nature/handling class.
-    pub event_type: EventType,
+    pub kind: EventKind,
     /// Delivery priority/urgency.
-    pub severity: Severity,
+    pub severity: EventSeverity,
     /// Short human-readable description.
     pub message: String,
     /// Context snapshot as JSON.
     pub payload: Option<serde_json::Value>,
 }
 
-/// Event type classification.
+/// Event kind classification.
 ///
 /// Categorizes events by their nature and intended handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, AsRefStr,
+)]
 #[serde(rename_all = "lowercase")]
-pub enum EventType {
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum EventKind {
     /// Rule-triggered notification (e.g., price threshold crossed).
     Alert,
     /// Collector or system error requiring attention.
@@ -86,38 +88,15 @@ pub enum EventType {
     Audit,
 }
 
-impl EventType {
-    /// Convert to database string representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Alert => "alert",
-            Self::Error => "error",
-            Self::System => "system",
-            Self::Audit => "audit",
-        }
-    }
-}
-
-impl FromStr for EventType {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "alert" => Ok(Self::Alert),
-            "error" => Ok(Self::Error),
-            "system" => Ok(Self::System),
-            "audit" => Ok(Self::Audit),
-            _ => Ok(Self::System),
-        }
-    }
-}
-
-/// Event severity levels.
+/// Event severity classification.
 ///
 /// Controls delivery priority and visual presentation of events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, AsRefStr,
+)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity {
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum EventSeverity {
     /// Verbose diagnostic information (development only).
     Debug,
     /// Normal operational information.
@@ -130,30 +109,107 @@ pub enum Severity {
     Critical,
 }
 
-impl Severity {
-    /// Convert to database string representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Debug => "debug",
-            Self::Info => "info",
-            Self::Warn => "warn",
-            Self::Error => "error",
-            Self::Critical => "critical",
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    // =========================================================================
+    // EventKind tests
+    // =========================================================================
+
+    #[test]
+    fn test_event_kind_from_str_valid() {
+        assert_eq!(EventKind::from_str("alert").unwrap(), EventKind::Alert);
+        assert_eq!(EventKind::from_str("error").unwrap(), EventKind::Error);
+        assert_eq!(EventKind::from_str("system").unwrap(), EventKind::System);
+        assert_eq!(EventKind::from_str("audit").unwrap(), EventKind::Audit);
     }
-}
 
-impl FromStr for Severity {
-    type Err = ();
+    #[test]
+    fn test_event_kind_from_str_case_insensitive() {
+        assert_eq!(EventKind::from_str("ALERT").unwrap(), EventKind::Alert);
+        assert_eq!(EventKind::from_str("Error").unwrap(), EventKind::Error);
+        assert_eq!(EventKind::from_str("SYSTEM").unwrap(), EventKind::System);
+        assert_eq!(EventKind::from_str("AuDiT").unwrap(), EventKind::Audit);
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "debug" => Ok(Self::Debug),
-            "info" => Ok(Self::Info),
-            "warn" => Ok(Self::Warn),
-            "error" => Ok(Self::Error),
-            "critical" => Ok(Self::Critical),
-            _ => Ok(Self::Info),
-        }
+    #[test]
+    fn test_event_kind_from_str_invalid() {
+        let result = EventKind::from_str("unknown");
+        assert!(result.is_err());
+        // Strum returns strum::ParseError
+    }
+
+    #[test]
+    fn test_event_kind_as_str() {
+        assert_eq!(EventKind::Alert.as_ref(), "alert");
+        assert_eq!(EventKind::Error.as_ref(), "error");
+        assert_eq!(EventKind::System.as_ref(), "system");
+        assert_eq!(EventKind::Audit.as_ref(), "audit");
+    }
+
+    // =========================================================================
+    // EventSeverity tests
+    // =========================================================================
+
+    #[test]
+    fn test_event_severity_from_str_valid() {
+        assert_eq!(
+            EventSeverity::from_str("debug").unwrap(),
+            EventSeverity::Debug
+        );
+        assert_eq!(
+            EventSeverity::from_str("info").unwrap(),
+            EventSeverity::Info
+        );
+        assert_eq!(
+            EventSeverity::from_str("warn").unwrap(),
+            EventSeverity::Warn
+        );
+        assert_eq!(
+            EventSeverity::from_str("error").unwrap(),
+            EventSeverity::Error
+        );
+        assert_eq!(
+            EventSeverity::from_str("critical").unwrap(),
+            EventSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn test_event_severity_from_str_case_insensitive() {
+        assert_eq!(
+            EventSeverity::from_str("DEBUG").unwrap(),
+            EventSeverity::Debug
+        );
+        assert_eq!(
+            EventSeverity::from_str("Info").unwrap(),
+            EventSeverity::Info
+        );
+        assert_eq!(
+            EventSeverity::from_str("WARN").unwrap(),
+            EventSeverity::Warn
+        );
+        assert_eq!(
+            EventSeverity::from_str("CrItIcAl").unwrap(),
+            EventSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn test_event_severity_from_str_invalid() {
+        let result = EventSeverity::from_str("fatal");
+        assert!(result.is_err());
+        // Strum returns strum::ParseError
+    }
+
+    #[test]
+    fn test_event_severity_as_str() {
+        assert_eq!(EventSeverity::Debug.as_ref(), "debug");
+        assert_eq!(EventSeverity::Info.as_ref(), "info");
+        assert_eq!(EventSeverity::Warn.as_ref(), "warn");
+        assert_eq!(EventSeverity::Error.as_ref(), "error");
+        assert_eq!(EventSeverity::Critical.as_ref(), "critical");
     }
 }

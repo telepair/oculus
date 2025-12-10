@@ -9,7 +9,7 @@ Unified Telemetry • Single Binary • No-Build Web
 Oculus is a lightweight, high-performance monitoring and observability system that bridges the gap between traditional infrastructure monitoring (like Prometheus) and financial market tracking (like TradingView).
 
 > ⚠️ **Status**: v0.1.0 (Genesis / MVP) - Under active development  
-> 🛑 **Scope Note**: v0.1.0 is single-tenant; no user/account/role management. One static token only.
+> 🛑 **Scope Note**: v0.1.0 is single-user; no user/account/role management.
 
 ## Features
 

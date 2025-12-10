@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 "#;
 
 pub const EVENTS_ENUMS_DDL: &str = r#"
-CREATE TYPE IF NOT EXISTS event_type AS ENUM ('alert', 'error', 'system', 'audit');
+CREATE TYPE IF NOT EXISTS event_kind AS ENUM ('alert', 'error', 'system', 'audit');
 CREATE TYPE IF NOT EXISTS event_severity AS ENUM ('debug', 'info', 'warn', 'error', 'critical');
 "#;
 
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
     id        BIGINT      PRIMARY KEY DEFAULT NEXTVAL('events_id_seq'),
     ts        BIGINT      NOT NULL,
     source    VARCHAR     NOT NULL,
-    type      event_type   NOT NULL,
+    kind      event_kind   NOT NULL,
     severity  event_severity NOT NULL,
     message   VARCHAR     NOT NULL,
     payload   VARCHAR

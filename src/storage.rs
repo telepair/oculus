@@ -6,7 +6,7 @@
 //!
 //! # Components
 //!
-//! - [`MetricWriter`] / [`EventWriter`]: Async write facades via MPSC channel
+//! - [`Writer`]: Unified async write facade for metrics and events via MPSC channel
 //! - [`MetricReader`] / [`EventReader`] / [`RawSqlReader`]: Sync read facades via pool
 //! - [`StorageAdmin`]: Cleanup and maintenance operations
 //! - [`StorageBuilder`] / [`StorageHandles`]: Initialization and lifecycle management
@@ -22,6 +22,7 @@ mod types;
 pub use builder::{StorageBuilder, StorageHandles};
 pub use error::StorageError;
 pub use facades::{
-    EventReader, EventWriter, MetricReader, MetricWriter, RawSqlReader, StorageAdmin,
+    EventQuery, EventReader, MetricQuery, MetricReader, RawSqlReader, SortOrder, StorageAdmin,
+    StorageWriter,
 };
-pub use types::{Event, EventType, Metric, Severity};
+pub use types::{Event, EventKind, EventSeverity, Metric};

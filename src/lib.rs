@@ -32,7 +32,7 @@
 //!         value: 42.0,
 //!         tags: None,
 //!     };
-//!     handles.metric_writer.insert(metric)?;
+//!     handles.writer.insert_metric(metric)?;
 //!
 //!     // Query metrics (via read pool)
 //!     let results = handles.metric_reader.query(Default::default())?;
@@ -44,10 +44,17 @@
 //! }
 //! ```
 
+pub mod collector;
 pub mod storage;
 
-// Re-export public types
+// Re-export storage types
 pub use storage::{
-    Event, EventReader, EventType, EventWriter, Metric, MetricReader, MetricWriter, RawSqlReader,
-    Severity, StorageAdmin, StorageBuilder, StorageError, StorageHandles,
+    Event, EventKind, EventQuery, EventReader, EventSeverity, Metric, MetricQuery, MetricReader,
+    RawSqlReader, SortOrder, StorageAdmin, StorageBuilder, StorageError, StorageHandles,
+    StorageWriter,
+};
+
+pub use collector::{
+    Collector, CollectorConfig, CollectorError, CollectorRegistry, JobInfo, Schedule,
+    network::{TcpCollector, TcpConfig},
 };
