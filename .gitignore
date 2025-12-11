@@ -1,6 +1,12 @@
 # Rust
 /target
 
+# App
+/configs/*.yaml
+!/configs/*.example.yaml
+/data
+*.db
+
 # IDE
 .vscode/
 .idea/
@@ -19,5 +25,8 @@ Thumbs.db
 # Claude
 .claude/
 
-# Tailwind
-templates/static/tailwind.css
+# Frontend (Tailwind CSS & Node)
+tools/tailwindcss
+templates/static/css/tailwind.css
+node_modules/
+package-lock.json

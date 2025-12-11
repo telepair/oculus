@@ -1,0 +1,21 @@
+server:
+  bind: 0.0.0.0
+  port: 8080
+
+database:
+  path: data/oculus.db
+  pool_size: 4
+  channel_capacity: 1000
+
+collectors:
+  - type: tcp
+    name: redis-probe
+    target: 127.0.0.1:6379
+    interval: 30s
+    timeout: 5s
+
+  - type: tcp
+    name: ssh-probe
+    target: 127.0.0.1:22
+    interval: 30s
+    timeout: 10s

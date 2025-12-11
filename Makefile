@@ -7,15 +7,15 @@
 # =============================================================================
 CARGO            := cargo
 CARGO_FLAGS      := --locked
-TAILWIND_BIN     := tailwindcss
-TAILWIND_INPUT   := templates/static/tailwind.input.css
-TAILWIND_OUTPUT  := templates/static/tailwind.css
+TAILWIND_BIN     := ./tools/tailwindcss
+TAILWIND_INPUT   := templates/static/css/tailwind.input.css
+TAILWIND_OUTPUT  := templates/static/css/tailwind.css
 TAILWIND_CONTENT := "templates/**/*.html src/**/*.rs"
 
 # =============================================================================
 # PHONY Targets
 # =============================================================================
-.PHONY: all fmt lint lint-rust lint-md check test doc doc-open build release install run tailwind tailwind-watch clean help
+.PHONY: all fmt lint lint-rust lint-md check test doc doc-open build release install run download-tailwind tailwind tailwind-watch clean help
 
 # =============================================================================
 # Development Workflow
@@ -86,10 +86,21 @@ run:                                  ## Run (use ARGS="..." for arguments)
 # Assets
 # =============================================================================
 
-tailwind:                             ## Build bundled Tailwind CSS (offline)
+download-tailwind:                    ## Download Tailwind CSS CLI if not present
+	@if [ ! -f $(TAILWIND_BIN) ]; then \
+		echo "Downloading Tailwind CSS CLI..."; \
+		mkdir -p tools; \
+		curl -sL https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-macos-arm64 -o $(TAILWIND_BIN); \
+		chmod +x $(TAILWIND_BIN); \
+		echo "✓ Tailwind CSS CLI installed to $(TAILWIND_BIN)"; \
+	else \
+		echo "✓ Tailwind CSS CLI already present"; \
+	fi
+
+tailwind: download-tailwind           ## Build bundled Tailwind CSS (offline)
 	@echo "Building Tailwind CSS..."
 	@mkdir -p $(dir $(TAILWIND_OUTPUT))
-	@test -f $(TAILWIND_INPUT) || { echo "Missing $(TAILWIND_INPUT); add @tailwind base/components/utilities"; exit 1; }
+	@test -f $(TAILWIND_INPUT) || { echo "Missing $(TAILWIND_INPUT); add @import \"tailwindcss\""; exit 1; }
 	@$(TAILWIND_BIN) -i $(TAILWIND_INPUT) -o $(TAILWIND_OUTPUT) --minify --content $(TAILWIND_CONTENT)
 
 # =============================================================================

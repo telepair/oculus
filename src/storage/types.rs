@@ -30,6 +30,8 @@ use strum_macros::{AsRefStr, Display, EnumString};
 ///     symbol: "crypto.price.btc_usd".to_string(),
 ///     value: 100000.0,
 ///     tags: Some(json!({"exchange": "binance"})),
+///     success: true,
+///     duration_ms: 150,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,10 @@ pub struct Metric {
     pub value: f64,
     /// Extended fields as JSON (e.g., {"region": "us"}).
     pub tags: Option<serde_json::Value>,
+    /// Whether the metric collection was successful.
+    pub success: bool,
+    /// Collection duration in milliseconds.
+    pub duration_ms: i64,
 }
 
 /// An event record stored in the `events` table.

@@ -49,6 +49,20 @@ impl StorageBuilder {
 
     /// Build the storage layer and return handles.
     pub fn build(self) -> Result<StorageHandles, StorageError> {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = self.db_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StorageError::Internal(format!(
+                    "Failed to create database directory '{}': {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+
         // Spawn writer actor
         let (actor_handle, tx) = DbActor::spawn(&self.db_path, self.channel_capacity)?;
 
@@ -139,6 +153,8 @@ mod tests {
                 symbol: "builder.test".to_string(),
                 value: 123.0,
                 tags: None,
+                success: true,
+                duration_ms: 0,
             };
             writer.insert_metric(metric).unwrap();
             admin.checkpoint().unwrap();
@@ -183,6 +199,8 @@ mod tests {
                     symbol: format!("metric.{i}"),
                     value: f64::from(i),
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 })
                 .collect();
 

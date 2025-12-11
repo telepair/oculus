@@ -136,6 +136,8 @@ impl DbActor {
                 &m.symbol,
                 m.value,
                 tags_json,
+                m.success,
+                m.duration_ms,
             ])?;
             tracing::debug!("Inserted metric: {m:?}");
         }
@@ -236,6 +238,8 @@ mod tests {
             symbol: "test.metric".to_string(),
             value: 42.0,
             tags: None,
+            success: true,
+            duration_ms: 0,
         };
 
         tx.send(Command::InsertMetric(metric)).unwrap();
@@ -336,6 +340,8 @@ mod tests {
             symbol: "old.metric".to_string(),
             value: 1.0,
             tags: None,
+            success: true,
+            duration_ms: 0,
         };
         tx.send(Command::InsertMetric(old_metric)).unwrap();
 
@@ -346,6 +352,8 @@ mod tests {
             symbol: "new.metric".to_string(),
             value: 2.0,
             tags: None,
+            success: true,
+            duration_ms: 0,
         };
         tx.send(Command::InsertMetric(new_metric)).unwrap();
         tx.send(Command::Checkpoint).unwrap();

@@ -31,6 +31,8 @@
 //!         symbol: "test.metric".to_string(),
 //!         value: 42.0,
 //!         tags: None,
+//!         success: true,
+//!         duration_ms: 0,
 //!     };
 //!     handles.writer.insert_metric(metric)?;
 //!
@@ -45,6 +47,8 @@
 //! ```
 
 pub mod collector;
+pub mod config;
+pub mod server;
 pub mod storage;
 
 // Re-export storage types
@@ -58,3 +62,7 @@ pub use collector::{
     Collector, CollectorConfig, CollectorError, CollectorRegistry, JobInfo, Schedule,
     network::{TcpCollector, TcpConfig},
 };
+
+pub use config::{AppConfig, CollectorConfigEntry, ConfigError, DatabaseConfig, ServerConfig};
+
+pub use server::{AppState, create_router};

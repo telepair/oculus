@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oculus - Unified Telemetry</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/tailwind.css">
+</head>
+<body class="font-['Inter',sans-serif] bg-gradient-to-br from-neutral-950 to-neutral-900 text-neutral-200 min-h-screen overflow-x-hidden">
+    <div class="flex h-screen">
+        <!-- Sidebar -->
+        <aside class="w-70 bg-gradient-to-b from-neutral-900 to-neutral-950 border-r border-neutral-800 py-8 flex flex-col shadow-2xl">
+            <div class="px-6 pb-8 border-b border-neutral-800 mb-6">
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent mb-1">Oculus</h1>
+                <p class="text-sm text-neutral-500 font-normal">Unified Telemetry</p>
+            </div>
+
+            <nav>
+                <div class="px-4 mb-2">
+                    <h2 class="text-xs uppercase tracking-wider text-neutral-600 font-semibold px-2 py-3">Modules</h2>
+                    <div class="nav-item active space-y-1">
+                        <div onclick="switchModule('metrics')" 
+                             class="flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition-all duration-200 bg-gradient-to-r from-blue-900/50 to-purple-900/50 text-blue-400 shadow-lg shadow-blue-500/30">
+                            <span class="text-xl">📊</span>
+                            <span class="font-medium">Metrics</span>
+                        </div>
+                        <div onclick="switchModule('events')" 
+                             class="flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition-all duration-200 text-neutral-400 hover:bg-neutral-800 hover:text-blue-400 hover:translate-x-1">
+                            <span class="text-xl">🔔</span>
+                            <span class="font-medium">Events</span>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 overflow-y-auto px-12 py-8 scrollbar-custom">
+            <div class="mb-10">
+                <h2 class="text-4xl font-bold text-neutral-100 mb-2">Dashboard</h2>
+                <p class="text-neutral-500">Real-time monitoring and observability</p>
+            </div>
+
+            <!-- Metrics Module -->
+            <section id="metrics" class="bg-gradient-to-br from-neutral-900/80 to-neutral-950/80 rounded-2xl p-8 mb-8 border border-neutral-800 shadow-2xl backdrop-blur-sm animate-fade-in">
+                <div class="flex justify-between items-center mb-6 pb-4 border-b border-neutral-800">
+                    <h3 class="text-2xl font-semibold text-neutral-100">📊 Metrics</h3>
+                </div>
+
+                <div class="flex flex-wrap gap-4 mb-6">
+                    <div class="flex flex-col gap-2">
+                        <label for="metric-category" class="text-sm text-neutral-500 font-medium">Category</label>
+                        <select id="metric-category" 
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="">All Categories</option>
+                            <option value="latency">Latency</option>
+                            <option value="throughput">Throughput</option>
+                            <option value="error_rate">Error Rate</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="metric-symbol" class="text-sm text-neutral-500 font-medium">Symbol</label>
+                        <input type="text" id="metric-symbol" placeholder="Filter by symbol"
+                               class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="metric-limit" class="text-sm text-neutral-500 font-medium">Limit</label>
+                        <select id="metric-limit"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="10">10 rows</option>
+                            <option value="25">25 rows</option>
+                            <option value="50" selected>50 rows</option>
+                            <option value="100">100 rows</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="metric-order" class="text-sm text-neutral-500 font-medium">Sort Order</label>
+                        <select id="metric-order"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="desc">Newest First</option>
+                            <option value="asc">Oldest First</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label class="text-sm text-transparent select-none">.</label>
+                        <button onclick="refreshMetrics()" 
+                                class="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg text-white font-semibold text-sm cursor-pointer transition-all shadow-lg shadow-blue-500/30 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/40 active:translate-y-0">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div id="metrics-data"
+                     hx-get="/api/metrics?limit=50&order=desc" 
+                     hx-trigger="load, every 30s" 
+                     hx-swap="innerHTML">
+                    <div class="text-center py-12 text-neutral-500 italic">Loading metrics...</div>
+                </div>
+            </section>
+
+            <!-- Events Module -->
+            <section id="events" class="hidden bg-gradient-to-br from-neutral-900/80 to-neutral-950/80 rounded-2xl p-8 mb-8 border border-neutral-800 shadow-2xl backdrop-blur-sm animate-fade-in">
+                <div class="flex justify-between items-center mb-6 pb-4 border-b border-neutral-800">
+                    <h3 class="text-2xl font-semibold text-neutral-100">🔔 Events</h3>
+                </div>
+
+                <div class="flex flex-wrap gap-4 mb-6">
+                    <div class="flex flex-col gap-2">
+                        <label for="event-source" class="text-sm text-neutral-500 font-medium">Source</label>
+                        <input type="text" id="event-source" placeholder="Filter by source"
+                               class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="event-kind" class="text-sm text-neutral-500 font-medium">Kind</label>
+                        <select id="event-kind"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="">All Kinds</option>
+                            <option value="alert">Alert</option>
+                            <option value="error">Error</option>
+                            <option value="system">System</option>
+                            <option value="audit">Audit</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="event-severity" class="text-sm text-neutral-500 font-medium">Severity</label>
+                        <select id="event-severity"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="">All Severities</option>
+                            <option value="debug">Debug</option>
+                            <option value="info">Info</option>
+                            <option value="warn">Warning</option>
+                            <option value="error">Error</option>
+                            <option value="critical">Critical</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="event-limit" class="text-sm text-neutral-500 font-medium">Limit</label>
+                        <select id="event-limit"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="10">10 rows</option>
+                            <option value="25">25 rows</option>
+                            <option value="50" selected>50 rows</option>
+                            <option value="100">100 rows</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label for="event-order" class="text-sm text-neutral-500 font-medium">Sort Order</label>
+                        <select id="event-order"
+                                class="px-4 py-2.5 bg-neutral-900 border border-neutral-700 rounded-lg text-neutral-200 text-sm font-normal transition-all min-w-[150px] hover:border-blue-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20">
+                            <option value="desc">Newest First</option>
+                            <option value="asc">Oldest First</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <label class="text-sm text-transparent select-none">.</label>
+                        <button onclick="refreshEvents()" 
+                                class="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg text-white font-semibold text-sm cursor-pointer transition-all shadow-lg shadow-blue-500/30 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/40 active:translate-y-0">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div id="events-data"
+                     hx-get="/api/events?limit=50&order=desc" 
+                     hx-trigger="load, every 30s" 
+                     hx-swap="innerHTML">
+                    <div class="text-center py-12 text-neutral-500 italic">Loading events...</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    
+    <style>
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fade-in 0.5s ease-out;
+        }
+        /* Tailwind doesn't support these selectors, so we keep nav-item logic in CSS */
+        .nav-item > div:not(.active) {
+            color: rgb(163 163 163);
+        }
+    </style>
+</body>
+</html>

@@ -10,11 +10,13 @@ use crate::storage::StorageError;
 /// for reliable cross-connection queries.
 pub const METRICS_TABLE_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS metrics (
-    ts        BIGINT      NOT NULL,
-    category  VARCHAR     NOT NULL,
-    symbol    VARCHAR     NOT NULL,
-    value     DOUBLE      NOT NULL,
-    tags      VARCHAR
+    ts          BIGINT      NOT NULL,
+    category    VARCHAR     NOT NULL,
+    symbol      VARCHAR     NOT NULL,
+    value       DOUBLE      NOT NULL,
+    tags        VARCHAR,
+    success     BOOLEAN     NOT NULL DEFAULT TRUE,
+    duration_ms BIGINT      NOT NULL DEFAULT 0
 );
 "#;
 

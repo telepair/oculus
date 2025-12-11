@@ -15,6 +15,8 @@ Time-series numeric data points.
 | symbol | VARCHAR | NOT NULL | Unique identifier (e.g., "crypto.price.btc_usd") |
 | value | DOUBLE | NOT NULL | Numeric value |
 | tags | VARCHAR | NULL | JSON-encoded extended attributes |
+| success | BOOLEAN | NOT NULL DEFAULT TRUE | Whether collection was successful |
+| duration_ms | BIGINT | NOT NULL DEFAULT 0 | Collection duration in milliseconds |
 
 **Note**: Timestamps are stored as BIGINT (microseconds) instead of TIMESTAMPTZ for reliable cross-connection queries in DuckDB.
 
@@ -66,11 +68,13 @@ CREATE TYPE event_severity AS ENUM ('debug', 'info', 'warn', 'error', 'critical'
 ```sql
 -- Metrics table
 CREATE TABLE IF NOT EXISTS metrics (
-    ts        BIGINT      NOT NULL,
-    category  VARCHAR     NOT NULL,
-    symbol    VARCHAR     NOT NULL,
-    value     DOUBLE      NOT NULL,
-    tags      VARCHAR
+    ts          BIGINT      NOT NULL,
+    category    VARCHAR     NOT NULL,
+    symbol      VARCHAR     NOT NULL,
+    value       DOUBLE      NOT NULL,
+    tags        VARCHAR,
+    success     BOOLEAN     NOT NULL DEFAULT TRUE,
+    duration_ms BIGINT      NOT NULL DEFAULT 0
 );
 
 -- Event types

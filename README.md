@@ -90,7 +90,7 @@ make doc-open   # Build and view documentation
 Oculus uses a YAML configuration file for collectors and rules:
 
 ```yaml
-# Example: config.yaml
+# Example: configs/config.yaml
 collectors:
   - type: network
     probe: ping

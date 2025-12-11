@@ -171,6 +171,8 @@ impl Collector for TcpCollector {
             symbol,
             value: latency_ms.unwrap_or(-1.0),
             tags: Some(tags),
+            success,
+            duration_ms: elapsed.as_millis() as i64,
         };
 
         self.writer.insert_metric(metric)?;

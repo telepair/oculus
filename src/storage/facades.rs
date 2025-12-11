@@ -219,7 +219,7 @@ impl MetricReader {
         let effective_order = q.order.unwrap_or_default();
 
         let mut parts = vec![
-            "SELECT ts, category, symbol, value, tags FROM metrics WHERE 1=1",
+            "SELECT ts, category, symbol, value, tags, success, duration_ms FROM metrics WHERE 1=1",
             "AND ts >= ?",
             "AND ts <= ?",
         ];
@@ -254,6 +254,8 @@ impl MetricReader {
             let value: f64 = row.get(3)?;
             let tags_str: Option<String> = row.get(4)?;
             let tags = tags_str.and_then(|s| serde_json::from_str(&s).ok());
+            let success: bool = row.get(5)?;
+            let duration_ms: i64 = row.get(6)?;
 
             Ok(Metric {
                 ts,
@@ -261,6 +263,8 @@ impl MetricReader {
                 symbol,
                 value,
                 tags,
+                success,
+                duration_ms,
             })
         })?;
 
@@ -557,6 +561,8 @@ mod tests {
             symbol: "test.metric".to_string(),
             value: 42.0,
             tags: None,
+            success: true,
+            duration_ms: 0,
         };
         writer.insert_metric(metric).unwrap();
 
@@ -664,6 +670,8 @@ mod tests {
                     symbol: format!("raw.metric.{i}"),
                     value: f64::from(i * 10),
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 };
                 writer.insert_metric(metric).unwrap();
             }
@@ -711,6 +719,8 @@ mod tests {
                     symbol: "btc.price".to_string(),
                     value: 100000.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: Utc::now(),
@@ -718,6 +728,8 @@ mod tests {
                     symbol: "eth.price".to_string(),
                     value: 4000.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: Utc::now(),
@@ -725,6 +737,8 @@ mod tests {
                     symbol: "ping.latency".to_string(),
                     value: 50.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
             ];
             writer.insert_metrics(metrics).unwrap();
@@ -853,6 +867,8 @@ mod tests {
                     symbol: "oldest".to_string(),
                     value: 1.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: now - Duration::hours(1),
@@ -860,6 +876,8 @@ mod tests {
                     symbol: "middle".to_string(),
                     value: 2.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: now,
@@ -867,6 +885,8 @@ mod tests {
                     symbol: "newest".to_string(),
                     value: 3.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
             ];
             writer.insert_metrics(metrics).unwrap();
@@ -919,6 +939,8 @@ mod tests {
                     symbol: format!("metric.{i}"),
                     value: f64::from(i),
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 })
                 .collect();
             writer.insert_metrics(metrics).unwrap();
@@ -979,6 +1001,8 @@ mod tests {
                     symbol: "old".to_string(),
                     value: 1.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: now - Duration::days(3), // Within default range
@@ -986,6 +1010,8 @@ mod tests {
                     symbol: "recent".to_string(),
                     value: 2.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
                 Metric {
                     ts: now,
@@ -993,6 +1019,8 @@ mod tests {
                     symbol: "now".to_string(),
                     value: 3.0,
                     tags: None,
+                    success: true,
+                    duration_ms: 0,
                 },
             ];
             writer.insert_metrics(metrics).unwrap();

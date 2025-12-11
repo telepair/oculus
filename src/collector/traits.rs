@@ -108,6 +108,21 @@ pub trait CollectorConfig: Send + Sync + 'static {
 ///
 /// Collectors are async and run in scheduled jobs. They hold writers internally
 /// and perform data collection/submission in `collect()`.
+///
+/// # Error Handling Philosophy
+///
+/// The `collect()` method distinguishes between **probe failures** and **collector errors**:
+///
+/// - **Probe failures** (target unreachable, timeout, connection refused): These are valid
+///   observation results and should be recorded as metrics with `success: false`. The
+///   `collect()` method should return `Ok(())` in these cases.
+///
+/// - **Collector errors** (configuration issues, storage write failures): These indicate
+///   the collector itself cannot function and require intervention. The `collect()`
+///   method should return `Err(CollectorError)` in these cases.
+///
+/// This design ensures continuous monitoring data even when targets are down, while
+/// surfacing real infrastructure problems via error propagation.
 #[async_trait::async_trait]
 pub trait Collector: Send + Sync + 'static {
     /// Associated configuration type.
@@ -124,10 +139,18 @@ pub trait Collector: Send + Sync + 'static {
 
     /// Perform one collection cycle.
     ///
-    /// This method should:
-    /// 1. Probe the target
-    /// 2. Create metric(s) from the results
-    /// 3. Send metrics/events via internal writers
+    /// # Behavior
+    ///
+    /// 1. Probe the target and measure duration
+    /// 2. Create metric(s) with `success: true/false` based on probe result
+    /// 3. Record `duration_ms` for performance tracking
+    /// 4. Send metrics/events via internal writers
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Collection completed (probe succeeded OR failed - both are valid data points)
+    /// - `Err(CollectorError::Storage)`: Failed to write to storage (infrastructure problem)
+    /// - `Err(CollectorError::Config)`: Invalid configuration (requires manual fix)
     async fn collect(&self) -> Result<(), CollectorError>;
 }
 

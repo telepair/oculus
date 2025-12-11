@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         symbol: "my.metric".to_string(),
         value: 42.0,
         tags: None,
+        success: true,
     })?;
 
     // Force WAL checkpoint for immediate read visibility
