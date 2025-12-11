@@ -2,11 +2,14 @@
 
 use std::time::Duration;
 
-use crate::{StorageError, StorageWriter};
+use crate::{StorageError, storage::MetricCategory};
 use thiserror::Error;
 
 /// Minimum allowed interval (1 second).
 pub const MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Maximum allowed interval (30 days).
+pub const MAX_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Errors that can occur during collection.
 #[derive(Debug, Error)]
@@ -53,13 +56,18 @@ pub enum Schedule {
 impl Schedule {
     /// Create an interval schedule.
     ///
-    /// Interval is clamped to a minimum of 1 second.
+    /// Interval is clamped to a minimum of 1 second and maximum of 30 days.
     pub fn interval(duration: Duration) -> Self {
         if duration < MIN_INTERVAL {
             tracing::warn!(min_interval = ?MIN_INTERVAL,
                 "Interval duration is less than minimum allowed. Using minimum duration."
             );
             Self::Interval(MIN_INTERVAL)
+        } else if duration > MAX_INTERVAL {
+            tracing::warn!(max_interval = ?MAX_INTERVAL,
+                "Interval duration exceeds maximum allowed. Using maximum duration."
+            );
+            Self::Interval(MAX_INTERVAL)
         } else {
             Self::Interval(duration)
         }
@@ -90,24 +98,15 @@ impl std::fmt::Display for Schedule {
     }
 }
 
-/// Configuration trait for collectors.
-///
-/// Implement this trait to define collector-specific settings.
-pub trait CollectorConfig: Send + Sync + 'static {
-    /// Unique identifier for this collector instance.
-    fn name(&self) -> &str;
-
-    /// Execution schedule (interval or cron).
-    fn schedule(&self) -> &Schedule;
-
-    /// Timeout for each probe operation.
-    fn timeout(&self) -> Duration;
-}
-
 /// Core collector trait for implementing data collectors.
 ///
 /// Collectors are async and run in scheduled jobs. They hold writers internally
 /// and perform data collection/submission in `collect()`.
+///
+/// # Lifecycle
+///
+/// 1. `upsert_series()` is called once during registration to create the metric series
+/// 2. `collect()` is called repeatedly on schedule to insert metric values
 ///
 /// # Error Handling Philosophy
 ///
@@ -125,26 +124,28 @@ pub trait CollectorConfig: Send + Sync + 'static {
 /// surfacing real infrastructure problems via error propagation.
 #[async_trait::async_trait]
 pub trait Collector: Send + Sync + 'static {
-    /// Associated configuration type.
-    type Config: CollectorConfig;
+    /// Unique identifier for this collector instance.
+    fn name(&self) -> &str;
 
-    /// Create a new collector with configuration and writers.
-    fn new(config: Self::Config, writer: StorageWriter) -> Self;
+    /// Category for metrics (e.g., "network.tcp", "crypto").
+    fn category(&self) -> MetricCategory;
 
-    /// Category for metrics (e.g., "network", "crypto").
-    fn category(&self) -> &str;
+    /// Execution schedule (interval or cron).
+    fn schedule(&self) -> &Schedule;
 
-    /// Get the collector's configuration.
-    fn config(&self) -> &Self::Config;
+    /// Upsert the metric series and return the series_id.
+    ///
+    /// Called once during collector registration to create/update the metric series.
+    /// Returns the series_id that should be used for subsequent metric value insertions.
+    fn upsert_metric_series(&self) -> Result<u64, CollectorError>;
 
     /// Perform one collection cycle.
     ///
     /// # Behavior
     ///
     /// 1. Probe the target and measure duration
-    /// 2. Create metric(s) with `success: true/false` based on probe result
-    /// 3. Record `duration_ms` for performance tracking
-    /// 4. Send metrics/events via internal writers
+    /// 2. Create metric value with `success: true/false` based on probe result
+    /// 3. Insert the metric value using the series_id from `upsert_metric_series()`
     ///
     /// # Returns
     ///
@@ -158,11 +159,25 @@ pub trait Collector: Send + Sync + 'static {
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // Schedule tests
+    // =========================================================================
+
     #[test]
     fn test_schedule_interval_minimum() {
         let schedule = Schedule::interval(Duration::from_millis(100));
         match schedule {
             Schedule::Interval(d) => assert_eq!(d, MIN_INTERVAL),
+            _ => panic!("expected Interval"),
+        }
+    }
+
+    #[test]
+    fn test_schedule_interval_maximum() {
+        // Exceeds 30 days - should be clamped to MAX_INTERVAL
+        let schedule = Schedule::interval(Duration::from_secs(31 * 24 * 60 * 60));
+        match schedule {
+            Schedule::Interval(d) => assert_eq!(d, MAX_INTERVAL),
             _ => panic!("expected Interval"),
         }
     }
@@ -191,5 +206,19 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("invalid cron"));
+    }
+
+    #[test]
+    fn test_schedule_display_interval() {
+        let schedule = Schedule::interval(Duration::from_secs(60));
+        let display = schedule.to_string();
+        assert!(display.contains("60"));
+    }
+
+    #[test]
+    fn test_schedule_display_cron() {
+        let schedule = Schedule::cron("0 0 * * * *").unwrap();
+        let display = schedule.to_string();
+        assert!(display.contains("0 0 * * * *"));
     }
 }

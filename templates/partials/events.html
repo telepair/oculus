@@ -1,0 +1,110 @@
+<table class="w-full text-sm">
+  <thead class="table-head text-left">
+    <tr>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Time
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Source
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Kind
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Severity
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Message
+      </th>
+    </tr>
+  </thead>
+  <tbody class="table-body divide-y divide-white/10">
+    {% if events.is_empty() %}
+    <tr>
+      <td colspan="5" class="px-4 py-12 text-center text-neutral-300">
+        <div class="flex flex-col items-center gap-2">
+          <span class="text-3xl">🔔</span>
+          <span>No events available</span>
+        </div>
+      </td>
+    </tr>
+    {% else %} {% for event in events %}
+    <tr class="table-row table-row-hover">
+      <td class="px-4 py-3 text-neutral-100 font-mono text-xs">
+        {{ event.ts.format("%Y-%m-%d %H:%M:%S") }}
+      </td>
+      <td class="px-4 py-3">
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="Event source"
+        >
+          {{ event.source.as_ref() }}
+        </span>
+      </td>
+      <td class="px-4 py-3">
+        <span
+          class="badge badge-neutral badge-strong text-xs"
+          title="Event kind"
+        >
+          {{ event.kind.as_ref() }}
+        </span>
+      </td>
+      <td class="px-4 py-3">
+        {% match event.severity %} {% when
+        crate::storage::EventSeverity::Critical %}
+        <span
+          class="badge badge-critical badge-strong text-xs animate-pulse"
+          title="Severity: Critical"
+        >
+          🔴 Critical
+        </span>
+        {% when crate::storage::EventSeverity::Error %}
+        <span
+          class="badge badge-fail badge-strong text-xs"
+          title="Severity: Error"
+        >
+          🟠 Error
+        </span>
+        {% when crate::storage::EventSeverity::Warn %}
+        <span
+          class="badge badge-warn badge-strong text-xs"
+          title="Severity: Warning"
+        >
+          🟡 Warning
+        </span>
+        {% when crate::storage::EventSeverity::Info %}
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="Severity: Info"
+        >
+          🔵 Info
+        </span>
+        {% when crate::storage::EventSeverity::Debug %}
+        <span
+          class="badge badge-neutral badge-strong text-xs"
+          title="Severity: Debug"
+        >
+          ⚪ Debug
+        </span>
+        {% endmatch %}
+      </td>
+      <td
+        class="px-4 py-3 text-neutral-100 cursor-help"
+        title="{% for (k, v) in event.payload %}{{ k }}: {{ v }}&#10;{% endfor %}"
+      >
+        {{ event.message }}
+      </td>
+    </tr>
+    {% endfor %} {% endif %}
+  </tbody>
+</table>

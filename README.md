@@ -62,15 +62,17 @@ Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Presentation/
 git clone https://github.com/telepair/oculus.git
 cd oculus
 
-# Build debug binary
-make build
+# Build full distribution (CSS + release binary)
+make release
 
 # Run with default config
-make run
+./target/release/oculus
 
-# Or build optimized release
-make release
+# Run with custom options
+./target/release/oculus --config configs/config.yaml --server-port 9090
 ```
+
+> 📖 See [Getting Started](docs/getting-started.md) for detailed configuration options.
 
 ### Development
 
@@ -128,8 +130,13 @@ oculus/
 ├── src/
 │   ├── lib.rs           # Library: shared core functionality
 │   └── main.rs          # Binary: runs complete system
+├── templates/           # Askama templates (compiled into binary)
+│   ├── dashboard.html
+│   └── static/css/
+├── configs/             # Configuration examples
 ├── docs/
 │   ├── PRD.md           # Product Requirements Document
+│   ├── getting-started.md # Build & Run Guide
 │   ├── lib.md           # Library Integration Guide
 │   └── schema.md        # Database Schema Reference
 ├── Cargo.toml           # Rust dependencies

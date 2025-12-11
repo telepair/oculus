@@ -5,13 +5,11 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::Metric;
-use crate::collector::{Collector, CollectorConfig, CollectorError, Schedule};
-use crate::storage::StorageWriter;
+use crate::collector::{Collector, CollectorError, Schedule};
+use crate::storage::{MetricCategory, MetricSeries, MetricValue, StaticTags, StorageWriter};
 
 /// Default collection interval (30 seconds).
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
@@ -19,34 +17,37 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
 /// Default connection timeout (3 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Category for metrics.
-const CATEGORY_TCP_PROBE: &str = "network.tcp.probe";
+/// Latency value indicating probe failure (connection refused, timeout, etc.).
+/// Using -1.0 to distinguish from valid 0ms latency.
+const FAILURE_LATENCY_MS: f64 = -1.0;
 
 /// Configuration for TCP port probe.
 #[derive(Debug, Clone)]
 pub struct TcpConfig {
     /// Unique name for this probe instance.
-    name: String,
+    pub name: String,
     /// Target socket address (host:port).
-    target: SocketAddr,
+    pub target_addr: SocketAddr,
+    /// Static tags for identity.
+    pub static_tags: StaticTags,
+    /// Human-readable description.
+    pub description: Option<String>,
     /// Execution schedule.
-    schedule: Schedule,
+    pub schedule: Schedule,
     /// Connection timeout.
-    conn_timeout: Duration,
+    pub conn_timeout: Duration,
 }
 
 impl TcpConfig {
     /// Create a new TCP probe configuration.
-    ///
-    /// # Arguments
-    /// * `name` - Unique identifier for this probe
-    /// * `target` - Target socket address (e.g., "127.0.0.1:6379")
     pub fn new(name: impl Into<String>, target: SocketAddr) -> Self {
         Self {
             name: name.into(),
-            target,
+            target_addr: target,
             schedule: Schedule::interval(DEFAULT_INTERVAL),
             conn_timeout: DEFAULT_TIMEOUT,
+            static_tags: StaticTags::new(),
+            description: None,
         }
     }
 
@@ -62,121 +63,114 @@ impl TcpConfig {
         self
     }
 
-    /// Get the target address.
-    pub fn target(&self) -> SocketAddr {
-        self.target
-    }
-}
-
-impl CollectorConfig for TcpConfig {
-    fn name(&self) -> &str {
-        &self.name
+    /// Set static tags.
+    pub fn with_static_tags(mut self, tags: StaticTags) -> Self {
+        self.static_tags = tags;
+        self
     }
 
-    fn schedule(&self) -> &Schedule {
-        &self.schedule
-    }
-
-    fn timeout(&self) -> Duration {
-        self.conn_timeout
+    /// Set description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 }
 
 /// TCP port probe collector.
 ///
 /// Measures TCP connection latency and reports success/failure.
-///
-/// # Metrics
-///
-/// Produces metrics with:
-/// - **symbol**: `net.tcp.<host>:<port>`
-/// - **value**: latency in milliseconds, or -1.0 on failure
-/// - **tags**: `{"target": "<addr>", "probe": "tcp", "success": true/false}`
 pub struct TcpCollector {
     config: TcpConfig,
     writer: StorageWriter,
+    series_id: u64,
+}
+
+impl TcpCollector {
+    /// Create a new TCP collector with the given configuration and writer.
+    pub fn new(config: TcpConfig, writer: StorageWriter) -> Self {
+        let series_id = MetricSeries::compute_series_id(
+            MetricCategory::NetworkTcp,
+            &config.name,
+            &config.target_addr.to_string(),
+            &config.static_tags,
+        );
+
+        Self {
+            config,
+            writer,
+            series_id,
+        }
+    }
+}
+
+impl std::fmt::Debug for TcpCollector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpCollector")
+            .field("config", &self.config)
+            .field("series_id", &self.series_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait::async_trait]
 impl Collector for TcpCollector {
-    type Config = TcpConfig;
-
-    fn new(config: Self::Config, writer: StorageWriter) -> Self {
-        Self { config, writer }
+    fn name(&self) -> &str {
+        &self.config.name
     }
 
-    fn category(&self) -> &str {
-        CATEGORY_TCP_PROBE
+    fn category(&self) -> MetricCategory {
+        MetricCategory::NetworkTcp
     }
 
-    fn config(&self) -> &Self::Config {
-        &self.config
+    fn schedule(&self) -> &Schedule {
+        &self.config.schedule
+    }
+
+    fn upsert_metric_series(&self) -> Result<u64, CollectorError> {
+        // Create series
+        let series = MetricSeries::new(
+            MetricCategory::NetworkTcp,
+            self.config.name.clone(),
+            self.config.target_addr.to_string(),
+            self.config.static_tags.clone(),
+            self.config.description.clone(),
+        );
+
+        self.writer.upsert_metric_series(series)?;
+        Ok(self.series_id)
     }
 
     async fn collect(&self) -> Result<(), CollectorError> {
-        let target = self.config.target;
+        let target = self.config.target_addr;
         let probe_timeout = self.config.conn_timeout;
 
         // Measure connection time
         let start = Instant::now();
         let result = timeout(probe_timeout, TcpStream::connect(target)).await;
         let elapsed = start.elapsed();
+        let duration_ms = elapsed.as_millis().min(u32::MAX as u128) as u32;
 
         let (latency_ms, success) = match result {
             Ok(Ok(_stream)) => {
-                // Connection successful
                 let ms = elapsed.as_secs_f64() * 1000.0;
-                tracing::debug!(
-                    name = %self.config.name,
-                    target = %target,
-                    latency_ms = ms,
-                    "TCP probe successful"
-                );
-                (Some(ms), true)
+                tracing::debug!(name = %self.config.name, target = %target, latency_ms = ms, "TCP probe successful");
+                (ms, true)
             }
             Ok(Err(e)) => {
-                // Connection failed (refused, unreachable, etc.)
-                tracing::warn!(
-                    name = %self.config.name,
-                    target = %target,
-                    error = %e,
-                    "TCP probe failed"
-                );
-                (None, false)
+                tracing::warn!(name = %self.config.name, target = %target, error = %e, "TCP probe failed");
+                (FAILURE_LATENCY_MS, false)
             }
             Err(_) => {
-                // Timeout
-                tracing::warn!(
-                    name = %self.config.name,
-                    target = %target,
-                    timeout_ms = probe_timeout.as_millis(),
-                    "TCP probe timed out"
-                );
-                (None, false)
+                tracing::warn!(name = %self.config.name, target = %target, timeout_ms = probe_timeout.as_millis(), "TCP probe timed out");
+                (FAILURE_LATENCY_MS, false)
             }
         };
 
-        // Build metric
-        let symbol = format!("net.tcp.{}:{}", target.ip(), target.port());
-        let tags = serde_json::json!({
-            "name": self.config.name,
-            "target": target.to_string(),
-            "schedule": self.config.schedule.to_string(),
-            "success": success,
-        });
+        // Create value with dynamic tags
+        let value = MetricValue::new(self.series_id, latency_ms, success, duration_ms)
+            .with_tag("schedule", self.config.schedule.to_string());
 
-        let metric = Metric {
-            ts: Utc::now(),
-            category: CATEGORY_TCP_PROBE.to_string(),
-            symbol,
-            value: latency_ms.unwrap_or(-1.0),
-            tags: Some(tags),
-            success,
-            duration_ms: elapsed.as_millis() as i64,
-        };
-
-        self.writer.insert_metric(metric)?;
-
+        self.writer.insert_metric_value(value)?;
         Ok(())
     }
 }
@@ -185,6 +179,7 @@ impl Collector for TcpCollector {
 mod tests {
     use super::*;
     use crate::storage::StorageBuilder;
+    use std::io::ErrorKind;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
 
@@ -193,11 +188,11 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
         let config = TcpConfig::new("redis", addr);
 
-        assert_eq!(config.name(), "redis");
-        assert_eq!(config.target(), addr);
+        assert_eq!(config.name, "redis");
+        assert_eq!(config.target_addr, addr);
         // Verify default schedule is an interval
-        assert!(matches!(config.schedule(), Schedule::Interval(d) if *d == DEFAULT_INTERVAL));
-        assert_eq!(config.timeout(), DEFAULT_TIMEOUT);
+        assert!(matches!(config.schedule, Schedule::Interval(d) if d == DEFAULT_INTERVAL));
+        assert_eq!(config.conn_timeout, DEFAULT_TIMEOUT);
     }
 
     #[test]
@@ -207,10 +202,8 @@ mod tests {
             .with_schedule(Schedule::interval(Duration::from_secs(60)))
             .with_timeout(Duration::from_secs(10));
 
-        assert!(
-            matches!(config.schedule(), Schedule::Interval(d) if *d == Duration::from_secs(60))
-        );
-        assert_eq!(config.timeout(), Duration::from_secs(10));
+        assert!(matches!(&config.schedule, Schedule::Interval(d) if *d == Duration::from_secs(60)));
+        assert_eq!(config.conn_timeout, Duration::from_secs(10));
     }
 
     #[test]
@@ -221,14 +214,14 @@ mod tests {
         let config = TcpConfig::new("postgres", addr).with_schedule(schedule);
 
         // Verify cron expression is stored correctly
-        match config.schedule() {
+        match &config.schedule {
             Schedule::Cron(expr) => assert_eq!(expr, "0 */5 * * * *"),
             _ => panic!("expected Cron schedule"),
         }
     }
 
     // =========================================================================
-    // Integration tests for TcpCollector::collect()
+    // Integration tests for TcpCollector
     // =========================================================================
 
     #[tokio::test]
@@ -237,7 +230,14 @@ mod tests {
         let db_path = dir.path().join("tcp_success.db");
 
         // Start a mock TCP listener on a random port
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                // Some sandboxed environments disallow binding; skip the test.
+                return;
+            }
+            Err(e) => panic!("Failed to bind test listener: {e}"),
+        };
         let addr = listener.local_addr().unwrap();
 
         // Accept connections in background (just consume them)
@@ -250,6 +250,10 @@ mod tests {
         let handles = StorageBuilder::new(&db_path).build().unwrap();
         let config = TcpConfig::new("test-success", addr).with_timeout(Duration::from_secs(1));
         let collector = TcpCollector::new(config, handles.writer.clone());
+
+        // Upsert series first
+        let series_id = collector.upsert_metric_series().unwrap();
+        assert!(series_id > 0);
 
         // Run collection - should succeed without errors
         let result = collector.collect().await;
@@ -273,6 +277,9 @@ mod tests {
         let config = TcpConfig::new("test-refused", addr).with_timeout(Duration::from_millis(500));
         let collector = TcpCollector::new(config, handles.writer.clone());
 
+        // Upsert series first
+        collector.upsert_metric_series().unwrap();
+
         // Run collection - should succeed (records failure metric, doesn't error)
         let result = collector.collect().await;
         assert!(
@@ -295,6 +302,9 @@ mod tests {
         let handles = StorageBuilder::new(&db_path).build().unwrap();
         let config = TcpConfig::new("test-timeout", addr).with_timeout(Duration::from_millis(100));
         let collector = TcpCollector::new(config, handles.writer.clone());
+
+        // Upsert series first
+        collector.upsert_metric_series().unwrap();
 
         // Run collection - should succeed (records failure metric, doesn't error)
         let result = collector.collect().await;

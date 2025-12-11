@@ -6,7 +6,6 @@
 //! # Architecture
 //!
 //! - [`Collector`]: Core trait for implementing data collectors
-//! - [`CollectorConfig`]: Configuration trait for collector settings
 //! - [`Schedule`]: Execution schedule (interval or cron)
 //! - [`CollectorRegistry`]: Manages collector lifecycle and graceful shutdown
 //!
@@ -30,5 +29,5 @@ pub mod network;
 mod registry;
 mod traits;
 
-pub use registry::{CollectorRegistry, DEFAULT_SHUTDOWN_TIMEOUT, JobInfo};
-pub use traits::{Collector, CollectorConfig, CollectorError, Schedule};
+pub use registry::{CollectorRegistry, JobInfo};
+pub use traits::{Collector, CollectorError, Schedule};

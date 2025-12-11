@@ -1,203 +1,349 @@
 //! Writer actor with dedicated connection and MPSC channel.
 //!
-//! This module implements the single-writer pattern for DuckDB:
-//! one thread owns the write connection and processes commands via MPSC.
+//! Single-writer pattern: one thread owns write connection, processes commands via MPSC.
+//! Implements batch buffering: flushes when buffer reaches 500 items or 1 second elapsed.
 
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use duckdb::Connection;
 
 use crate::storage::StorageError;
 use crate::storage::schema::init_schema;
-use crate::storage::{Event, Metric};
+use crate::storage::types::{Event, MetricSeries, MetricValue};
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Maximum items in buffer before flush.
+const BATCH_SIZE_THRESHOLD: usize = 500;
+
+/// Maximum time before buffer flush.
+const BATCH_TIME_THRESHOLD: Duration = Duration::from_secs(1);
+
+// =============================================================================
+// Commands
+// =============================================================================
 
 /// Commands sent to the writer actor.
 #[derive(Debug)]
 pub enum Command {
-    /// Insert a single metric.
-    InsertMetric(Metric),
-    /// Insert a batch of metrics.
-    InsertMetrics(Vec<Metric>),
-    /// Insert a single event.
+    /// Upsert metric series.
+    UpsertMetricSeries(MetricSeries),
+    /// Insert metric value (batch insert).
+    InsertMetricValue(MetricValue),
+    /// Insert event (immediate insert).
     InsertEvent(Event),
-    /// Insert a batch of events.
-    InsertEvents(Vec<Event>),
-    /// Delete metrics older than retention_days.
-    CleanupMetrics { retention_days: u32 },
-    /// Delete events older than retention_days.
+    /// Cleanup metric values older than retention_days (immediate cleanup).
+    CleanupMetricValues { retention_days: u32 },
+    /// Cleanup events older than retention_days (immediate cleanup).
     CleanupEvents { retention_days: u32 },
-    /// Force WAL checkpoint for read visibility.
+    /// Force flush all buffers.
+    Flush,
+    /// Force WAL checkpoint.
     Checkpoint,
     /// Graceful shutdown.
     Shutdown,
 }
 
-/// Database writer actor owning the exclusive write connection.
+// =============================================================================
+// Buffers
+// =============================================================================
+
+/// Buffer for batch inserts with time-based and size-based flushing.
+struct BatchBuffer<T> {
+    items: Vec<T>,
+    last_flush: Instant,
+}
+
+impl<T> BatchBuffer<T> {
+    fn new() -> Self {
+        Self {
+            items: Vec::with_capacity(BATCH_SIZE_THRESHOLD),
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        // Reset flush timer on first item to avoid treating long-idle buffers as overdue
+        if self.items.is_empty() {
+            self.last_flush = Instant::now();
+        }
+        self.items.push(item);
+    }
+
+    fn should_flush(&self) -> bool {
+        self.items.len() >= BATCH_SIZE_THRESHOLD
+            || (!self.items.is_empty() && self.last_flush.elapsed() >= BATCH_TIME_THRESHOLD)
+    }
+
+    fn take(&mut self) -> Vec<T> {
+        self.last_flush = Instant::now();
+        std::mem::take(&mut self.items)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+// =============================================================================
+// Actor
+// =============================================================================
+
+/// Database writer actor with batch buffering for metric values.
+///
+/// Only `MetricValue` uses batch buffering for high-throughput insertion.
+/// `MetricSeries` and `Event` are inserted immediately due to lower volume.
 pub struct DbActor {
     conn: Connection,
     rx: Receiver<Command>,
+    value_buffer: BatchBuffer<MetricValue>,
+    last_checkpoint: Instant,
+    checkpoint_interval: Duration,
 }
 
 impl DbActor {
     /// Spawn the writer actor thread.
     ///
-    /// Returns the thread handle and the command sender.
+    /// Returns a tuple of:
+    /// - `JoinHandle<()>`: Handle to the actor thread
+    /// - `SyncSender<Command>`: Channel sender for commands
+    /// - `Connection`: A cloneable connection for creating reader connections via `try_clone()`
     pub fn spawn(
         db_path: &Path,
         channel_capacity: usize,
-    ) -> Result<(JoinHandle<()>, SyncSender<Command>), StorageError> {
+        checkpoint_interval: Duration,
+    ) -> Result<(JoinHandle<()>, SyncSender<Command>, Connection), StorageError> {
         let (tx, rx) = mpsc::sync_channel(channel_capacity);
-
         let conn = Connection::open(db_path)?;
         init_schema(&conn)?;
 
-        let mut actor = DbActor { conn, rx };
+        // Create a cloneable connection for readers before moving conn to actor.
+        // DuckDB connections from try_clone() share the same underlying database instance,
+        // enabling readers to see writes without waiting for WAL checkpoint.
+        let reader_conn = conn.try_clone()?;
 
-        let handle = thread::spawn(move || {
-            actor.run();
-        });
+        let mut actor = DbActor {
+            conn,
+            rx,
+            value_buffer: BatchBuffer::new(),
+            last_checkpoint: Instant::now(),
+            checkpoint_interval,
+        };
+        let handle = thread::spawn(move || actor.run());
 
-        Ok((handle, tx))
+        Ok((handle, tx, reader_conn))
     }
 
-    /// Main event loop: receive and process commands.
     fn run(&mut self) {
         tracing::info!("DbActor started");
 
-        while let Ok(cmd) = self.rx.recv() {
-            match cmd {
-                Command::InsertMetric(metric) => {
-                    if let Err(e) = self.insert_metrics_batch(&[metric]) {
-                        tracing::error!("Failed to insert metric");
-                        tracing::debug!("Metric insertion error: {e}");
+        loop {
+            let now = Instant::now();
+            let flush_deadline = if !self.value_buffer.is_empty() {
+                self.value_buffer.last_flush + BATCH_TIME_THRESHOLD
+            } else {
+                now + Duration::from_secs(60)
+            };
+            let checkpoint_deadline = self.last_checkpoint + self.checkpoint_interval;
+
+            let deadline = std::cmp::min(flush_deadline, checkpoint_deadline);
+            let timeout = deadline.saturating_duration_since(now);
+
+            match self.rx.recv_timeout(timeout) {
+                Ok(cmd) => {
+                    if self.handle_command(cmd) {
+                        break; // Shutdown requested
                     }
                 }
-                Command::InsertMetrics(metrics) => {
-                    if let Err(e) = self.insert_metrics_batch(&metrics) {
-                        tracing::error!("Failed to insert metrics batch");
-                        tracing::debug!("Metrics batch insertion error: {e}");
-                    }
+                Err(RecvTimeoutError::Timeout) => {
+                    // Timeout: flush or checkpoint overdue
                 }
-                Command::InsertEvent(event) => {
-                    if let Err(e) = self.insert_events_batch(&[event]) {
-                        tracing::error!("Failed to insert event");
-                        tracing::debug!("Event insertion error: {e}");
-                    }
-                }
-                Command::InsertEvents(events) => {
-                    if let Err(e) = self.insert_events_batch(&events) {
-                        tracing::error!("Failed to insert events batch");
-                        tracing::debug!("Events batch insertion error: {e}");
-                    }
-                }
-                Command::CleanupMetrics { retention_days } => {
-                    if let Err(e) = self.cleanup_metrics(retention_days) {
-                        tracing::error!("Failed to cleanup metrics");
-                        tracing::debug!("Metrics cleanup error: {e}");
-                    }
-                }
-                Command::CleanupEvents { retention_days } => {
-                    if let Err(e) = self.cleanup_events(retention_days) {
-                        tracing::error!("Failed to cleanup events");
-                        tracing::debug!("Events cleanup error: {e}");
-                    }
-                }
-                Command::Checkpoint => {
-                    if let Err(e) = self.checkpoint() {
-                        tracing::error!("Failed to checkpoint");
-                        tracing::debug!("Checkpoint error: {e}");
-                    }
-                }
-                Command::Shutdown => {
-                    tracing::info!("DbActor shutting down");
-                    // Final checkpoint before exit
-                    let _ = self.checkpoint();
+                Err(RecvTimeoutError::Disconnected) => {
+                    tracing::warn!("Channel disconnected, shutting down");
+                    self.flush_all();
                     break;
                 }
+            }
+
+            // Check if any buffer needs flushing
+            if self.value_buffer.should_flush() {
+                self.flush_all();
+            }
+
+            // Check if checkpoint is needed
+            if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
+                self.flush_all(); // Ensure everything is written before checkpoint
+                if let Err(e) = self.checkpoint() {
+                    tracing::error!(error = %e, "Periodic checkpoint failed");
+                }
+                self.last_checkpoint = Instant::now();
             }
         }
 
         tracing::info!("DbActor stopped");
     }
 
-    /// Insert metrics using Appender for high-throughput.
-    fn insert_metrics_batch(&self, metrics: &[Metric]) -> Result<(), StorageError> {
-        let mut appender = self.conn.appender("metrics")?;
-
-        for m in metrics {
-            let ts_micros = m.ts.timestamp_micros();
-            let tags_json = m.tags.as_ref().map(|t| t.to_string());
-            appender.append_row(duckdb::params![
-                ts_micros,
-                &m.category,
-                &m.symbol,
-                m.value,
-                tags_json,
-                m.success,
-                m.duration_ms,
-            ])?;
-            tracing::debug!("Inserted metric: {m:?}");
+    fn handle_command(&mut self, cmd: Command) -> bool {
+        match cmd {
+            Command::UpsertMetricSeries(series) => {
+                // Series: upsert immediately (low volume)
+                if let Err(e) = self.upsert_series(&series) {
+                    tracing::error!(error = %e, "Series upsert failed");
+                }
+            }
+            Command::InsertMetricValue(value) => {
+                // Value: buffer for batch insert (high volume)
+                self.value_buffer.push(value);
+            }
+            Command::InsertEvent(event) => {
+                // Event: insert immediately (low volume)
+                if let Err(e) = self.insert_event(&event) {
+                    tracing::error!(error = %e, "Event insert failed");
+                }
+            }
+            Command::CleanupMetricValues { retention_days } => {
+                if let Err(e) = self.cleanup_metric_values(retention_days) {
+                    tracing::error!(error = %e, "Cleanup metric values failed");
+                }
+            }
+            Command::CleanupEvents { retention_days } => {
+                if let Err(e) = self.cleanup_events(retention_days) {
+                    tracing::error!(error = %e, "Cleanup events failed");
+                }
+            }
+            Command::Flush => {
+                self.flush_all();
+            }
+            Command::Checkpoint => {
+                self.flush_all();
+                if let Err(e) = self.checkpoint() {
+                    tracing::error!(error = %e, "Checkpoint failed");
+                }
+            }
+            Command::Shutdown => {
+                tracing::info!("DbActor shutting down");
+                self.flush_all();
+                let _ = self.checkpoint();
+                return true;
+            }
         }
+        false
+    }
 
-        appender.flush()?;
-        tracing::debug!("Flushed metrics");
+    fn flush_all(&mut self) {
+        if !self.value_buffer.is_empty() {
+            let values = self.value_buffer.take();
+            if let Err(e) = self.insert_values_batch(&values) {
+                tracing::error!(error = %e, count = values.len(), "Values batch insert failed");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Insert Operations
+    // =========================================================================
+
+    /// Upsert a single metric series (low volume, immediate write).
+    fn upsert_series(&self, s: &MetricSeries) -> Result<(), StorageError> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO metric_series (series_id, category, name, target, static_tags, description, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (series_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, description = EXCLUDED.description",
+        )?;
+
+        let tags_json = serde_json::to_string(&s.static_tags).unwrap_or_else(|_| "{}".to_string());
+        stmt.execute(duckdb::params![
+            s.series_id,
+            s.category.as_ref(),
+            &s.name,
+            &s.target,
+            tags_json,
+            s.description.as_deref(),
+            s.created_at.timestamp_micros(),
+            s.updated_at.timestamp_micros(),
+        ])?;
+
         Ok(())
     }
 
-    /// Insert events using prepared statement (Appender has issues with ENUM types).
-    fn insert_events_batch(&self, events: &[Event]) -> Result<(), StorageError> {
+    /// Batch insert metric values using DuckDB Appender (high volume).
+    fn insert_values_batch(&self, values: &[MetricValue]) -> Result<(), StorageError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let mut appender = self.conn.appender("metric_values")?;
+
+        for v in values {
+            let tags_json =
+                serde_json::to_string(&v.dynamic_tags).unwrap_or_else(|_| "{}".to_string());
+            appender.append_row(duckdb::params![
+                v.ts.timestamp_micros(),
+                v.series_id,
+                v.value,
+                v.success,
+                v.duration_ms,
+                tags_json,
+            ])?;
+        }
+
+        // Explicit flush to ensure data is immediately visible to reader connections
+        appender.flush()?;
+
+        tracing::debug!(count = values.len(), "Values batch inserted");
+        Ok(())
+    }
+
+    /// Insert a single event (low volume, immediate write).
+    fn insert_event(&self, e: &Event) -> Result<(), StorageError> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO events (ts, source, kind, severity, message, payload) \
+            "INSERT INTO events (ts, source, kind, severity, message, payload)
              VALUES (?, ?, ?, ?, ?, ?)",
         )?;
 
-        for e in events {
-            let ts_micros = e.ts.timestamp_micros();
-            let payload_json = e.payload.as_ref().map(|p| p.to_string());
-            stmt.execute(duckdb::params![
-                ts_micros,
-                &e.source,
-                e.kind.as_ref(),
-                e.severity.as_ref(),
-                &e.message,
-                payload_json,
-            ])?;
-            tracing::debug!("Inserted event: {e:?}");
-        }
+        let payload_json = serde_json::to_string(&e.payload).unwrap_or_else(|_| "{}".to_string());
+        stmt.execute(duckdb::params![
+            e.ts.timestamp_micros(),
+            e.source.as_ref(),
+            e.kind.as_ref(),
+            e.severity.as_ref(),
+            &e.message,
+            payload_json,
+        ])?;
 
         Ok(())
     }
 
-    /// Delete metrics older than retention_days.
-    fn cleanup_metrics(&self, retention_days: u32) -> Result<(), StorageError> {
+    // =========================================================================
+    // Maintenance Operations
+    // =========================================================================
+
+    fn cleanup_metric_values(&self, retention_days: u32) -> Result<(), StorageError> {
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
-        let cutoff_micros = cutoff.timestamp_micros();
-
-        let deleted = self
-            .conn
-            .execute("DELETE FROM metrics WHERE ts < ?", [cutoff_micros])?;
-
-        tracing::info!("Cleaned up {deleted} metrics older than {retention_days} days");
+        let deleted = self.conn.execute(
+            "DELETE FROM metric_values WHERE ts < ?",
+            [cutoff.timestamp_micros()],
+        )?;
+        tracing::info!(deleted, retention_days, "Metric values cleaned up");
         Ok(())
     }
 
-    /// Delete events older than retention_days.
     fn cleanup_events(&self, retention_days: u32) -> Result<(), StorageError> {
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
-        let cutoff_micros = cutoff.timestamp_micros();
-
-        let deleted = self
-            .conn
-            .execute("DELETE FROM events WHERE ts < ?", [cutoff_micros])?;
-
-        tracing::info!("Cleaned up {deleted} events older than {retention_days} days");
+        let deleted = self.conn.execute(
+            "DELETE FROM events WHERE ts < ?",
+            [cutoff.timestamp_micros()],
+        )?;
+        tracing::info!(deleted, retention_days, "Events cleaned up");
         Ok(())
     }
 
-    /// Force WAL checkpoint.
     fn checkpoint(&self) -> Result<(), StorageError> {
         self.conn.execute_batch("CHECKPOINT;")?;
         tracing::debug!("WAL checkpoint completed");
@@ -208,228 +354,258 @@ impl DbActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::types::{EventKind, EventSeverity};
+    use crate::storage::types::*;
     use tempfile::tempdir;
 
     #[test]
-    fn test_actor_spawn_and_shutdown() {
+    fn test_actor_lifecycle() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
-
-        // Send shutdown command
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&dir.path().join("test.db"), 100, Duration::from_secs(1)).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
-        // Wait for actor to finish
         handle.join().unwrap();
     }
 
     #[test]
-    fn test_actor_insert_metric() {
+    fn test_insert_metric_with_flush() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("metric.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
 
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+        let series = MetricSeries::new(
+            MetricCategory::NetworkTcp,
+            "latency",
+            "127.0.0.1:6379",
+            StaticTags::new(),
+            Some("Redis".to_string()),
+        );
+        let value = MetricValue::new(series.series_id, 42.5, true, 15);
 
-        let metric = Metric {
-            ts: Utc::now(),
-            category: "test".to_string(),
-            symbol: "test.metric".to_string(),
-            value: 42.0,
-            tags: None,
-            success: true,
-            duration_ms: 0,
-        };
-
-        tx.send(Command::InsertMetric(metric)).unwrap();
+        tx.send(Command::UpsertMetricSeries(series)).unwrap();
+        tx.send(Command::InsertMetricValue(value)).unwrap();
+        tx.send(Command::Flush).unwrap(); // Force flush
         tx.send(Command::Checkpoint).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
         handle.join().unwrap();
 
-        // Verify data was written
         let conn = Connection::open(&db_path).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
     }
 
     #[test]
-    fn test_actor_insert_event() {
+    fn test_series_deduplication() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("event_test.db");
+        let db_path = dir.path().join("dedup.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
 
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+        let series1 = MetricSeries::new(
+            MetricCategory::Custom,
+            "test",
+            "t",
+            StaticTags::new(),
+            Some("First".to_string()),
+        );
+        let series2 = MetricSeries::new(
+            MetricCategory::Custom,
+            "test",
+            "t",
+            StaticTags::new(),
+            Some("Second".to_string()),
+        );
 
-        let event = Event {
-            id: None,
-            ts: Utc::now(),
-            source: "test.actor".to_string(),
-            kind: EventKind::System,
-            severity: EventSeverity::Info,
-            message: "Actor test event".to_string(),
-            payload: Some(serde_json::json!({"test": true})),
-        };
+        assert_eq!(series1.series_id, series2.series_id);
+
+        tx.send(Command::UpsertMetricSeries(series1.clone()))
+            .unwrap();
+        tx.send(Command::InsertMetricValue(MetricValue::new(
+            series1.series_id,
+            1.0,
+            true,
+            0,
+        )))
+        .unwrap();
+        tx.send(Command::UpsertMetricSeries(series2.clone()))
+            .unwrap();
+        tx.send(Command::InsertMetricValue(MetricValue::new(
+            series2.series_id,
+            2.0,
+            true,
+            0,
+        )))
+        .unwrap();
+        tx.send(Command::Flush).unwrap();
+        tx.send(Command::Checkpoint).unwrap();
+        tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM metric_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let desc: String = conn
+            .query_row("SELECT description FROM metric_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "Second");
+    }
+
+    #[test]
+    fn test_insert_event_with_flush() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("event.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+
+        let event = Event::new(
+            EventSource::System,
+            EventKind::System,
+            EventSeverity::Info,
+            "Started",
+        )
+        .with_payload("version", "1.0.0");
 
         tx.send(Command::InsertEvent(event)).unwrap();
+        tx.send(Command::Flush).unwrap();
         tx.send(Command::Checkpoint).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
         handle.join().unwrap();
 
-        // Verify event was written
         let conn = Connection::open(&db_path).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
-
-        // Verify event has auto-generated id
-        let id: i64 = conn
-            .query_row("SELECT id FROM events", [], |row| row.get(0))
-            .unwrap();
-        assert!(id > 0);
     }
 
     #[test]
-    fn test_actor_insert_events_batch() {
+    fn test_batch_threshold() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("events_batch.db");
+        let db_path = dir.path().join("batch.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 1000, Duration::from_secs(1)).unwrap();
 
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+        // Insert exactly BATCH_SIZE_THRESHOLD items
+        for i in 0..BATCH_SIZE_THRESHOLD {
+            let series = MetricSeries::new(
+                MetricCategory::Custom,
+                "batch",
+                format!("target-{i}"),
+                StaticTags::new(),
+                None,
+            );
+            let value = MetricValue::new(series.series_id, i as f64, true, 0);
+            tx.send(Command::UpsertMetricSeries(series)).unwrap();
+            tx.send(Command::InsertMetricValue(value)).unwrap();
+        }
 
-        let events: Vec<Event> = (0..5)
-            .map(|i| Event {
-                id: None,
-                ts: Utc::now(),
-                source: format!("batch.source.{i}"),
-                kind: EventKind::Alert,
-                severity: EventSeverity::Warn,
-                message: format!("Batch event {i}"),
-                payload: None,
-            })
-            .collect();
-
-        tx.send(Command::InsertEvents(events)).unwrap();
+        // Wait for auto-flush (buffer should be full)
+        std::thread::sleep(Duration::from_millis(100));
         tx.send(Command::Checkpoint).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
         handle.join().unwrap();
 
         let conn = Connection::open(&db_path).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, BATCH_SIZE_THRESHOLD as i64);
     }
 
     #[test]
-    fn test_actor_cleanup_metrics() {
+    fn test_time_based_flush() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("cleanup_metrics.db");
+        let db_path = dir.path().join("time_flush.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
 
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+        // Insert fewer items than BATCH_SIZE_THRESHOLD
+        let series = MetricSeries::new(
+            MetricCategory::Custom,
+            "time_test",
+            "target",
+            StaticTags::new(),
+            None,
+        );
+        let value = MetricValue::new(series.series_id, 42.0, true, 10);
 
-        // Insert old metric (10 days ago)
-        let old_ts = Utc::now() - chrono::Duration::days(10);
-        let old_metric = Metric {
-            ts: old_ts,
-            category: "cleanup".to_string(),
-            symbol: "old.metric".to_string(),
-            value: 1.0,
-            tags: None,
-            success: true,
-            duration_ms: 0,
-        };
-        tx.send(Command::InsertMetric(old_metric)).unwrap();
+        tx.send(Command::UpsertMetricSeries(series)).unwrap();
+        tx.send(Command::InsertMetricValue(value)).unwrap();
 
-        // Insert recent metric
-        let new_metric = Metric {
-            ts: Utc::now(),
-            category: "cleanup".to_string(),
-            symbol: "new.metric".to_string(),
-            value: 2.0,
-            tags: None,
-            success: true,
-            duration_ms: 0,
-        };
-        tx.send(Command::InsertMetric(new_metric)).unwrap();
-        tx.send(Command::Checkpoint).unwrap();
+        // Wait for time-based flush (BATCH_TIME_THRESHOLD = 1 second)
+        std::thread::sleep(Duration::from_millis(1200));
 
-        // Cleanup metrics older than 7 days
-        tx.send(Command::CleanupMetrics { retention_days: 7 })
-            .unwrap();
+        // Checkpoint and shutdown
         tx.send(Command::Checkpoint).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
         handle.join().unwrap();
 
-        // Verify only recent metric remains
+        // Verify data was flushed by time threshold
         let conn = Connection::open(&db_path).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1);
-
-        let symbol: String = conn
-            .query_row("SELECT symbol FROM metrics", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(symbol, "new.metric");
+        assert_eq!(count, 1, "Time-based flush should have written the value");
     }
 
     #[test]
-    fn test_actor_cleanup_events() {
+    fn test_cleanup_operations() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("cleanup_events.db");
+        let db_path = dir.path().join("cleanup.db");
+        let (handle, tx, _reader_conn) =
+            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
 
-        let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+        // Insert test data
+        let series = MetricSeries::new(
+            MetricCategory::Custom,
+            "cleanup_test",
+            "target",
+            StaticTags::new(),
+            None,
+        );
 
-        // Insert old event (10 days ago)
-        let old_ts = Utc::now() - chrono::Duration::days(10);
-        let old_event = Event {
-            id: None,
-            ts: old_ts,
-            source: "old.source".to_string(),
-            kind: EventKind::System,
-            severity: EventSeverity::Info,
-            message: "Old event".to_string(),
-            payload: None,
-        };
-        tx.send(Command::InsertEvent(old_event)).unwrap();
+        // Insert metric value with current timestamp
+        let value = MetricValue::new(series.series_id, 100.0, true, 5);
+        tx.send(Command::UpsertMetricSeries(series)).unwrap();
+        tx.send(Command::InsertMetricValue(value)).unwrap();
 
-        // Insert recent event
-        let new_event = Event {
-            id: None,
-            ts: Utc::now(),
-            source: "new.source".to_string(),
-            kind: EventKind::Alert,
-            severity: EventSeverity::Critical,
-            message: "New event".to_string(),
-            payload: None,
-        };
-        tx.send(Command::InsertEvent(new_event)).unwrap();
+        // Insert event
+        let event = Event::new(
+            EventSource::System,
+            EventKind::System,
+            EventSeverity::Info,
+            "Test event",
+        );
+        tx.send(Command::InsertEvent(event)).unwrap();
+        tx.send(Command::Flush).unwrap();
         tx.send(Command::Checkpoint).unwrap();
 
-        // Cleanup events older than 7 days
-        tx.send(Command::CleanupEvents { retention_days: 7 })
+        // Cleanup with 0 retention days (should delete all data)
+        // Note: This tests that the cleanup commands execute without error
+        tx.send(Command::CleanupMetricValues { retention_days: 0 })
             .unwrap();
+        tx.send(Command::CleanupEvents { retention_days: 0 })
+            .unwrap();
+
         tx.send(Command::Checkpoint).unwrap();
         tx.send(Command::Shutdown).unwrap();
-
         handle.join().unwrap();
 
-        // Verify only recent event remains
+        // Verify data was cleaned up
         let conn = Connection::open(&db_path).unwrap();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        let metric_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1);
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
 
-        let source: String = conn
-            .query_row("SELECT source FROM events", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(source, "new.source");
+        assert_eq!(metric_count, 0, "Cleanup should have deleted metric values");
+        assert_eq!(event_count, 0, "Cleanup should have deleted events");
     }
 }

@@ -6,9 +6,12 @@
 //! - Collector definitions (type, name, target, schedule, timeout)
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
+
+use crate::storage::MetricCategory;
 
 /// Configuration error types.
 #[derive(Debug, Error)]
@@ -73,6 +76,10 @@ pub struct DatabaseConfig {
     /// MPSC channel capacity for write operations (default: 1000).
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
+
+    /// WAL checkpoint interval (default: "5s").
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval: String,
 }
 
 fn default_pool_size() -> u32 {
@@ -80,27 +87,41 @@ fn default_pool_size() -> u32 {
 }
 
 fn default_channel_capacity() -> usize {
-    1000
+    10_000
+}
+
+fn default_checkpoint_interval() -> String {
+    "5s".to_string()
 }
 
 /// Collector configuration entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectorConfigEntry {
-    /// Collector type (e.g., "tcp", "http", "ping").
+    /// Collector type - maps to MetricCategory (e.g., "network.tcp", "crypto").
     #[serde(rename = "type")]
-    pub collector_type: String,
+    pub collector_type: MetricCategory,
 
     /// Unique collector name.
     pub name: String,
 
-    /// Target endpoint (e.g., "127.0.0.1:6379", "https://api.example.com").
+    /// Target endpoint (e.g., "127.0.0.1:6379", "<https://api.example.com>").
     pub target: String,
 
-    /// Collection interval (e.g., "30s", "1m", "5m").
-    pub interval: String,
+    /// Collection interval (e.g., "30s", "1m", "5m"). Mutually exclusive with `cron`.
+    #[serde(default)]
+    pub interval: Option<String>,
+
+    /// Cron expression for scheduled execution (6-field: sec min hour day month weekday).
+    /// Mutually exclusive with `interval`.
+    #[serde(default)]
+    pub cron: Option<String>,
 
     /// Timeout for each probe (e.g., "5s").
     pub timeout: String,
+
+    /// Static tags for this collector (key-value pairs).
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 impl AppConfig {
@@ -141,6 +162,11 @@ impl AppConfig {
             ));
         }
 
+        // Validate checkpoint interval
+        parse_duration(&self.database.checkpoint_interval).map_err(|e| {
+            ConfigError::ValidationError(format!("database checkpoint_interval: {}", e))
+        })?;
+
         // Validate collectors
         for collector in &self.collectors {
             if collector.name.is_empty() {
@@ -156,13 +182,39 @@ impl AppConfig {
                 )));
             }
 
-            // Validate interval format (e.g., "30s", "1m")
-            parse_duration(&collector.interval).map_err(|e| {
-                ConfigError::ValidationError(format!(
-                    "collector '{}': invalid interval format: {}",
-                    collector.name, e
-                ))
-            })?;
+            // Validate schedule: either interval or cron must be set (not both)
+            match (&collector.interval, &collector.cron) {
+                (Some(interval), None) => {
+                    parse_duration(interval).map_err(|e| {
+                        ConfigError::ValidationError(format!(
+                            "collector '{}': invalid interval format: {}",
+                            collector.name, e
+                        ))
+                    })?;
+                }
+                (None, Some(cron_expr)) => {
+                    // Validate cron expression
+                    use std::str::FromStr;
+                    cron::Schedule::from_str(cron_expr).map_err(|e| {
+                        ConfigError::ValidationError(format!(
+                            "collector '{}': invalid cron expression: {}",
+                            collector.name, e
+                        ))
+                    })?;
+                }
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::ValidationError(format!(
+                        "collector '{}': cannot specify both 'interval' and 'cron'",
+                        collector.name
+                    )));
+                }
+                (None, None) => {
+                    return Err(ConfigError::ValidationError(format!(
+                        "collector '{}': must specify either 'interval' or 'cron'",
+                        collector.name
+                    )));
+                }
+            }
 
             // Validate timeout format
             parse_duration(&collector.timeout).map_err(|e| {
@@ -178,7 +230,19 @@ impl AppConfig {
 }
 
 /// Parse duration string (e.g., "30s", "1m", "5m").
-fn parse_duration(s: &str) -> Result<Duration, String> {
+///
+/// Supports units: `s` (seconds), `m` (minutes), `h` (hours).
+///
+/// # Examples
+///
+/// ```
+/// use oculus::config::parse_duration;
+///
+/// assert_eq!(parse_duration("30s").unwrap().as_secs(), 30);
+/// assert_eq!(parse_duration("1m").unwrap().as_secs(), 60);
+/// assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
+/// ```
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("duration string is empty".to_string());
@@ -228,13 +292,16 @@ mod tests {
                 path: "./test.db".to_string(),
                 pool_size: 4,
                 channel_capacity: 1000,
+                checkpoint_interval: "5s".to_string(),
             },
             collectors: vec![CollectorConfigEntry {
-                collector_type: "tcp".to_string(),
+                collector_type: MetricCategory::NetworkTcp,
                 name: "test-probe".to_string(),
                 target: "127.0.0.1:6379".to_string(),
-                interval: "30s".to_string(),
+                interval: Some("30s".to_string()),
+                cron: None,
                 timeout: "5s".to_string(),
+                tags: BTreeMap::new(),
             }],
         };
 
@@ -252,6 +319,7 @@ mod tests {
                 path: "./test.db".to_string(),
                 pool_size: 4,
                 channel_capacity: 1000,
+                checkpoint_interval: "5s".to_string(),
             },
             collectors: vec![],
         };
@@ -270,6 +338,7 @@ mod tests {
                 path: "./test.db".to_string(),
                 pool_size: 0,
                 channel_capacity: 1000,
+                checkpoint_interval: "5s".to_string(),
             },
             collectors: vec![],
         };
@@ -288,13 +357,16 @@ mod tests {
                 path: "./test.db".to_string(),
                 pool_size: 4,
                 channel_capacity: 1000,
+                checkpoint_interval: "5s".to_string(),
             },
             collectors: vec![CollectorConfigEntry {
-                collector_type: "tcp".to_string(),
+                collector_type: MetricCategory::NetworkTcp,
                 name: "test".to_string(),
                 target: "127.0.0.1:6379".to_string(),
-                interval: "invalid".to_string(),
+                interval: Some("invalid".to_string()),
+                cron: None,
                 timeout: "5s".to_string(),
+                tags: BTreeMap::new(),
             }],
         };
 

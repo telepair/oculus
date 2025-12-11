@@ -1,0 +1,94 @@
+<table class="w-full text-sm">
+  <thead class="table-head text-left">
+    <tr>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Time
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Category
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Name
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Target
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Value
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Status
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Duration
+      </th>
+    </tr>
+  </thead>
+  <tbody class="table-body divide-y divide-white/10">
+    {% if metrics.is_empty() %}
+    <tr>
+      <td colspan="7" class="px-4 py-12 text-center text-neutral-300">
+        <div class="flex flex-col items-center gap-2">
+          <span class="text-3xl">📊</span>
+          <span>No metrics available</span>
+        </div>
+      </td>
+    </tr>
+    {% else %} {% for metric in metrics %}
+    <tr class="table-row table-row-hover">
+      <td class="px-4 py-3 text-neutral-100 font-mono text-xs">
+        {{ metric.ts.format("%Y-%m-%d %H:%M:%S") }}
+      </td>
+      <td class="px-4 py-3">
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="Metric category"
+        >
+          {{ metric.category.as_ref() }}
+        </span>
+      </td>
+      <td class="px-4 py-3 text-neutral-100 font-medium">{{ metric.name }}</td>
+      <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
+        {{ metric.target }}
+      </td>
+      <td class="px-4 py-3 text-neutral-100 font-mono">
+        {{ "{:.2}"|format(metric.value) }}
+      </td>
+      <td class="px-4 py-3">
+        {% if metric.success %}
+        <span
+          class="badge badge-success badge-strong text-xs"
+          title="Status: Success"
+        >
+          ✓ Success
+        </span>
+        {% else %}
+        <span
+          class="badge badge-fail badge-strong text-xs"
+          title="Status: Failed"
+        >
+          ✗ Failed
+        </span>
+        {% endif %}
+      </td>
+      <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
+        {{ metric.duration_ms }}ms
+      </td>
+    </tr>
+    {% endfor %} {% endif %}
+  </tbody>
+</table>

@@ -5,17 +5,26 @@ server:
 database:
   path: data/oculus.db
   pool_size: 4
-  channel_capacity: 1000
+  channel_capacity: 10000
+  checkpoint_interval: 5s # Optimized for stability, 1s caused bus errors
 
 collectors:
-  - type: tcp
-    name: redis-probe
-    target: 127.0.0.1:6379
-    interval: 30s
+  # Probing Google DNS (8.8.8.8:53)
+  - type: network.tcp
+    name: google-dns
+    target: 8.8.8.8:53
+    interval: 5s
     timeout: 5s
+    tags:
+      env: production
+      service: external
 
-  - type: tcp
-    name: ssh-probe
-    target: 127.0.0.1:22
-    interval: 30s
-    timeout: 10s
+  # Failing probe (localhost:9999)
+  - type: network.tcp
+    name: localhost-fail
+    target: 127.0.0.1:9999
+    interval: 5s
+    timeout: 1s
+    tags:
+      env: local
+      service: test

@@ -13,16 +13,24 @@ use crate::storage::pool::ReadPool;
 use crate::storage::{EventReader, MetricReader, RawSqlReader, StorageAdmin, StorageWriter};
 
 /// Default channel capacity for writer commands.
-const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+///
+/// With batch flushing every 500 items or 1 second, this capacity supports:
+/// - Up to 10,000 queued metrics before blocking
+/// - Approximately 20 seconds of buffering at 500 metrics/sec
+const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 
 /// Default connection pool size for readers.
 const DEFAULT_POOL_SIZE: u32 = 4;
+
+/// Default WAL checkpoint interval.
+const DEFAULT_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Builder for constructing the storage layer.
 pub struct StorageBuilder {
     db_path: PathBuf,
     pool_size: u32,
     channel_capacity: usize,
+    checkpoint_interval: std::time::Duration,
 }
 
 impl StorageBuilder {
@@ -32,6 +40,7 @@ impl StorageBuilder {
             db_path: db_path.as_ref().to_path_buf(),
             pool_size: DEFAULT_POOL_SIZE,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
         }
     }
 
@@ -44,6 +53,12 @@ impl StorageBuilder {
     /// Set the channel capacity for writer commands.
     pub fn channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
+        self
+    }
+
+    /// Set the WAL checkpoint interval.
+    pub fn checkpoint_interval(mut self, interval: std::time::Duration) -> Self {
+        self.checkpoint_interval = interval;
         self
     }
 
@@ -63,11 +78,17 @@ impl StorageBuilder {
             })?;
         }
 
-        // Spawn writer actor
-        let (actor_handle, tx) = DbActor::spawn(&self.db_path, self.channel_capacity)?;
+        // Spawn writer actor - returns a cloneable connection for readers
+        let (actor_handle, tx, reader_conn) = DbActor::spawn(
+            &self.db_path,
+            self.channel_capacity,
+            self.checkpoint_interval,
+        )?;
 
-        // Create reader pool
-        let pool = ReadPool::new(&self.db_path, self.pool_size)?;
+        // Create reader pool from the cloned connection.
+        // This ensures readers share the same database instance as the writer,
+        // enabling immediate write visibility without WAL checkpoint delays.
+        let pool = ReadPool::new(reader_conn);
 
         Ok(StorageHandles {
             writer: StorageWriter::new(tx.clone()),
@@ -128,46 +149,46 @@ impl Drop for StorageHandles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::facades::MetricQuery;
-    use crate::storage::types::Metric;
-    use chrono::Utc;
+    use crate::storage::types::{MetricCategory, MetricSeries, MetricValue, StaticTags};
     use tempfile::tempdir;
 
     #[test]
     fn test_storage_builder() {
         use crate::storage::actor::DbActor;
-        use crate::storage::facades::{StorageAdmin, StorageWriter};
+        use crate::storage::facades::{MetricQuery, StorageAdmin, StorageWriter};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        // Phase 1: Write using actor directly (no ReadPool during write)
+        // Phase 1: Write using actor directly
         {
-            let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+            let (handle, tx, _reader_conn) =
+                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
-            let metric = Metric {
-                ts: Utc::now(),
-                category: "test".to_string(),
-                symbol: "builder.test".to_string(),
-                value: 123.0,
-                tags: None,
-                success: true,
-                duration_ms: 0,
-            };
-            writer.insert_metric(metric).unwrap();
+            let series = MetricSeries::new(
+                MetricCategory::Custom,
+                "test",
+                "builder.test",
+                StaticTags::new(),
+                None,
+            );
+            let value = MetricValue::new(series.series_id, 123.0, true, 0);
+
+            writer.upsert_metric_series(series).unwrap();
+            writer.insert_metric_value(value).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
         }
 
-        // Phase 2: Read using StorageBuilder (creates fresh connections)
+        // Phase 2: Read using StorageBuilder
         let handles = StorageBuilder::new(&db_path).build().unwrap();
         let results = handles
             .metric_reader
             .query(MetricQuery {
-                symbol: Some("builder.test".to_string()),
+                target: Some("builder.test".to_string()),
                 ..Default::default()
             })
             .unwrap();
@@ -181,30 +202,31 @@ mod tests {
     #[test]
     fn test_storage_roundtrip() {
         use crate::storage::actor::DbActor;
-        use crate::storage::facades::{StorageAdmin, StorageWriter};
+        use crate::storage::facades::{MetricQuery, StorageAdmin, StorageWriter};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("roundtrip.db");
 
         // Phase 1: Write using actor directly
         {
-            let (handle, tx) = DbActor::spawn(&db_path, 100).unwrap();
+            let (handle, tx, _reader_conn) =
+                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
-            let metrics: Vec<Metric> = (0..5)
-                .map(|i| Metric {
-                    ts: Utc::now(),
-                    category: "roundtrip".to_string(),
-                    symbol: format!("metric.{i}"),
-                    value: f64::from(i),
-                    tags: None,
-                    success: true,
-                    duration_ms: 0,
-                })
-                .collect();
+            for i in 0..5 {
+                let series = MetricSeries::new(
+                    MetricCategory::Custom,
+                    "roundtrip",
+                    format!("target.{i}"),
+                    StaticTags::new(),
+                    None,
+                );
+                let value = MetricValue::new(series.series_id, f64::from(i), true, 0);
+                writer.upsert_metric_series(series).unwrap();
+                writer.insert_metric_value(value).unwrap();
+            }
 
-            writer.insert_metrics(metrics).unwrap();
             admin.checkpoint().unwrap();
             admin.shutdown().unwrap();
             handle.join().unwrap();
@@ -215,7 +237,7 @@ mod tests {
         let results = handles
             .metric_reader
             .query(MetricQuery {
-                category: Some("roundtrip".to_string()),
+                name: Some("roundtrip".to_string()),
                 ..Default::default()
             })
             .unwrap();

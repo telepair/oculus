@@ -4,33 +4,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio::sync::RwLock;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::collector::{Collector, CollectorConfig, CollectorError, Schedule};
-use crate::{Event, EventKind, EventSeverity, StorageWriter};
+use crate::collector::{Collector, CollectorError, Schedule};
+use crate::storage::MetricCategory;
+use crate::{Event, EventKind, EventPayload, EventSeverity, EventSource, StorageWriter};
 
 /// Default timeout for graceful shutdown (5 seconds).
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// Static event source tag for registry events.
-const REGISTRY_EVENT_SOURCE: &str = "collector.registry";
 
 /// Metadata about a registered job.
 #[derive(Debug, Clone)]
 pub struct JobInfo {
     /// Job UUID.
     pub id: uuid::Uuid,
+    /// Category of the collector.
+    pub category: MetricCategory,
     /// Collector name.
     pub name: String,
+    /// Metric series ID.
+    pub metric_series_id: u64,
     /// Schedule description.
     pub schedule: String,
 }
 
+struct JobContext<C> {
+    collector: Arc<C>,
+    name: String,
+    category: MetricCategory,
+    writer: StorageWriter,
+}
+
 /// Registry for managing multiple collector tasks.
-///
-/// Uses `tokio-cron-scheduler` for robust job scheduling.
-/// Supports both fixed-interval and cron-based scheduling.
 pub struct CollectorRegistry {
     scheduler: JobScheduler,
     jobs: Arc<RwLock<HashMap<uuid::Uuid, JobInfo>>>,
@@ -65,16 +71,42 @@ impl std::fmt::Debug for CollectorRegistry {
 
 impl CollectorRegistry {
     /// Register and spawn a collector.
+    ///
+    /// This method:
+    /// 1. Calls `upsert_series()` to register the metric series
+    /// 2. Creates a scheduled job that calls `collect()` repeatedly
     pub async fn spawn<C: Collector>(&self, collector: C) -> Result<uuid::Uuid, CollectorError> {
-        let name = collector.config().name().to_string();
-        let schedule_desc = collector.config().schedule().to_string();
-        let category = collector.category().to_string();
+        let name = collector.name().to_string();
+        let schedule_desc = collector.schedule().to_string();
+        let category = collector.category();
+        let category_str = category.as_ref();
+
+        // Upsert metric series during registration
+        let series_id = collector.upsert_metric_series().inspect_err(|e| {
+            self.emit_job_error(
+                &name,
+                category_str,
+                0,
+                &schedule_desc.clone(),
+                e,
+                "upsert_series",
+            )
+        })?;
 
         let collector = Arc::new(collector);
         let job = self
             .create_job(Arc::clone(&collector), &name)
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
-            .inspect_err(|e| self.emit_job_error(&name, &category, &schedule_desc, e, "create"))?;
+            .inspect_err(|e| {
+                self.emit_job_error(
+                    &name,
+                    category_str,
+                    series_id,
+                    &schedule_desc.clone(),
+                    e,
+                    "create",
+                )
+            })?;
 
         let job_id = self
             .scheduler
@@ -82,27 +114,43 @@ impl CollectorRegistry {
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
             .inspect_err(|e| {
-                self.emit_job_error(&name, &category, &schedule_desc, e, "register")
+                self.emit_job_error(
+                    &name,
+                    category_str,
+                    series_id,
+                    &schedule_desc.clone(),
+                    e,
+                    "register",
+                )
             })?;
 
         self.jobs.write().await.insert(
             job_id,
             JobInfo {
                 id: job_id,
+                category,
                 name: name.clone(),
+                metric_series_id: series_id,
                 schedule: schedule_desc.clone(),
             },
         );
 
-        self.emit_info(
-            format!("Job '{}' created", name),
-            serde_json::json!({
-                "job_id": job_id.to_string(),
-                "collector": name,
-                "category": category,
-                "schedule": schedule_desc,
-            }),
+        tracing::info!(
+            category = category_str,
+            collector = %name,
+            series_id = series_id,
+            job_id = %job_id,
+            schedule = %schedule_desc,
+            "Metric series registered"
         );
+
+        self.emit_info(format!("Job created: {}", name), |p| {
+            p.insert("job_id".into(), job_id.to_string());
+            p.insert("collector".into(), name.clone());
+            p.insert("category".into(), category_str.to_string());
+            p.insert("schedule".into(), schedule_desc);
+            p.insert("series_id".into(), series_id.to_string());
+        });
 
         tracing::info!(collector = %name, job_id = %job_id, "Collector registered");
         Ok(job_id)
@@ -114,7 +162,7 @@ impl CollectorRegistry {
             .start()
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))?;
-        self.emit_info("Collector scheduler started", serde_json::json!({}));
+        self.emit_info("Collector scheduler started", |_| {});
         tracing::info!("Collector scheduler started");
         Ok(())
     }
@@ -129,7 +177,7 @@ impl CollectorRegistry {
         self.jobs.read().await.len()
     }
 
-    /// Gracefully shutdown the scheduler with default timeout.
+    /// Gracefully shutdown the scheduler.
     pub async fn shutdown(self) -> Result<(), CollectorError> {
         self.shutdown_with_timeout(DEFAULT_SHUTDOWN_TIMEOUT).await
     }
@@ -145,40 +193,32 @@ impl CollectorRegistry {
         })
         .await;
 
-        let mut timed_out = false;
-        if let Some(err) = match shutdown_result {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e),
-            Err(_) => {
-                timed_out = true;
-                None
+        match shutdown_result {
+            Ok(Ok(())) => {
+                tracing::info!("Collector scheduler shutdown complete");
+                self.emit(EventSeverity::Info, "Scheduler shutdown complete", |p| {
+                    p.insert("job_count".into(), job_count.to_string());
+                    p.insert("timed_out".into(), "false".into());
+                });
+                Ok(())
             }
-        } {
-            self.emit(
-                EventSeverity::Error,
-                "Collector scheduler shutdown failed",
-                serde_json::json!({ "job_count": job_count, "error": err.to_string() }),
-            );
-            return Err(err);
+            Ok(Err(err)) => {
+                self.emit(EventSeverity::Error, "Scheduler shutdown failed", |p| {
+                    p.insert("job_count".into(), job_count.to_string());
+                    p.insert("error".into(), err.to_string());
+                });
+                Err(err)
+            }
+            Err(_) => {
+                let err = CollectorError::Scheduler("scheduler shutdown timed out".to_string());
+                tracing::error!("Collector scheduler shutdown timed out");
+                self.emit(EventSeverity::Error, "Scheduler shutdown timed out", |p| {
+                    p.insert("job_count".into(), job_count.to_string());
+                    p.insert("timed_out".into(), "true".into());
+                });
+                Err(err)
+            }
         }
-
-        let (severity, msg) = if timed_out {
-            tracing::warn!("Collector scheduler shutdown timed out");
-            (
-                EventSeverity::Warn,
-                "Collector scheduler shutdown timed out",
-            )
-        } else {
-            tracing::info!("Collector scheduler shutdown complete");
-            (EventSeverity::Info, "Collector scheduler shutdown complete")
-        };
-
-        self.emit(
-            severity,
-            msg,
-            serde_json::json!({ "job_count": job_count, "timed_out": timed_out }),
-        );
-        Ok(())
     }
 
     /// Remove a specific collector job by ID.
@@ -190,23 +230,23 @@ impl CollectorRegistry {
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
             .inspect_err(|e| {
-                self.emit(
-                    EventSeverity::Error,
-                    format!("Job '{}' remove failed", job_id),
-                    serde_json::json!({
-                        "job_id": job_id.to_string(),
-                        "collector": job_name,
-                        "error": e.to_string(),
-                    }),
-                );
+                self.emit(EventSeverity::Error, "Job remove failed", |p| {
+                    p.insert("job_id".into(), job_id.to_string());
+                    if let Some(ref name) = job_name {
+                        p.insert("collector".into(), name.clone());
+                    }
+                    p.insert("error".into(), e.to_string());
+                });
             })?;
 
         self.jobs.write().await.remove(job_id);
 
-        self.emit_info(
-            format!("Job '{}' removed", job_id),
-            serde_json::json!({ "job_id": job_id.to_string(), "collector": job_name }),
-        );
+        self.emit_info("Job removed", |p| {
+            p.insert("job_id".into(), job_id.to_string());
+            if let Some(ref name) = job_name {
+                p.insert("collector".into(), name.clone());
+            }
+        });
         tracing::info!(job_id = %job_id, "Collector removed");
         Ok(())
     }
@@ -219,15 +259,22 @@ impl CollectorRegistry {
         name: &str,
     ) -> Result<Job, CollectorError> {
         let name = name.to_owned();
+        let category = collector.category();
         let writer = self.writer.clone();
-        let schedule = collector.config().schedule().clone();
+        let schedule = collector.schedule().clone();
+
+        let context = Arc::new(JobContext {
+            collector,
+            name,
+            category,
+            writer,
+        });
 
         let make_callback = move || {
-            let (collector, name, writer) = (Arc::clone(&collector), name.clone(), writer.clone());
+            let ctx = Arc::clone(&context);
             move |_: uuid::Uuid, _: JobScheduler| {
-                let (collector, name, writer) =
-                    (Arc::clone(&collector), name.clone(), writer.clone());
-                Box::pin(async move { run_collection(&collector, &name, &writer).await })
+                let ctx = Arc::clone(&ctx);
+                Box::pin(async move { run_collection(ctx).await })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
             }
         };
@@ -243,30 +290,31 @@ impl CollectorRegistry {
         &self,
         severity: EventSeverity,
         message: impl Into<String>,
-        payload: serde_json::Value,
+        build_payload: impl FnOnce(&mut EventPayload),
     ) {
-        let event = Event {
-            id: None,
-            ts: Utc::now(),
-            source: REGISTRY_EVENT_SOURCE.to_owned(),
-            kind: EventKind::System,
+        let mut payload = EventPayload::new();
+        build_payload(&mut payload);
+        let event = Event::new(
+            EventSource::CollectorRegistry,
+            EventKind::System,
             severity,
-            message: message.into(),
-            payload: Some(payload),
-        };
+            message,
+        )
+        .with_payloads(payload);
         if let Err(e) = self.writer.insert_event(event) {
             tracing::warn!(error = %e, "Failed to enqueue event");
         }
     }
 
-    fn emit_info(&self, message: impl Into<String>, payload: serde_json::Value) {
-        self.emit(EventSeverity::Info, message, payload);
+    fn emit_info(&self, message: impl Into<String>, build_payload: impl FnOnce(&mut EventPayload)) {
+        self.emit(EventSeverity::Info, message, build_payload);
     }
 
     fn emit_job_error(
         &self,
         name: &str,
         category: &str,
+        metric_series_id: u64,
         schedule: &str,
         err: &CollectorError,
         stage: &str,
@@ -274,62 +322,64 @@ impl CollectorRegistry {
         self.emit(
             EventSeverity::Error,
             format!("Job '{}' {} failed", name, stage),
-            serde_json::json!({
-                "collector": name,
-                "category": category,
-                "schedule": schedule,
-                "error": err.to_string(),
-                "stage": stage,
-            }),
+            |p| {
+                p.insert("collector".into(), name.to_string());
+                p.insert("category".into(), category.to_string());
+                p.insert("metric_series_id".into(), metric_series_id.to_string());
+                p.insert("schedule".into(), schedule.to_string());
+                p.insert("error".into(), err.to_string());
+                p.insert("stage".into(), stage.to_string());
+            },
         );
     }
 }
 
-/// Execute a single collection cycle and record the result.
-async fn run_collection<C: Collector>(collector: &Arc<C>, name: &str, writer: &StorageWriter) {
-    let start = std::time::Instant::now();
-    tracing::debug!(collector = %name, "Running collection");
+/// Map category to EventSource.
+fn category_to_event_source(category: MetricCategory) -> EventSource {
+    match category {
+        MetricCategory::NetworkTcp => EventSource::CollectorNetworkTcp,
+        MetricCategory::NetworkPing => EventSource::CollectorNetworkPing,
+        MetricCategory::NetworkHttp => EventSource::CollectorNetworkHttp,
+        _ => EventSource::Other,
+    }
+}
 
-    let result = collector.collect().await;
+/// Execute a single collection cycle and record the result.
+async fn run_collection<C: Collector>(ctx: Arc<JobContext<C>>) {
+    let start = std::time::Instant::now();
+    tracing::debug!(collector = %ctx.name, "Running collection");
+
+    let result = ctx.collector.collect().await;
     let duration_ms = start.elapsed().as_millis();
 
-    let (kind, severity, message, status) = match &result {
-        Ok(()) => {
-            tracing::debug!(collector = %name, duration_ms, "Collection succeeded");
-            (
-                EventKind::System,
-                EventSeverity::Debug,
-                format!("Collection completed in {}ms", duration_ms),
-                "success",
-            )
-        }
-        Err(e) => {
-            tracing::error!(collector = %name, error = %e, "Collection failed");
-            (
-                EventKind::Error,
-                EventSeverity::Error,
-                format!("Collection failed: {}", e),
-                "failed",
-            )
-        }
-    };
-
-    let mut payload =
-        serde_json::json!({ "collector": name, "duration_ms": duration_ms, "status": status });
-    if let Err(e) = &result {
-        payload["error"] = serde_json::json!(e.to_string());
+    if let Ok(()) = result {
+        tracing::debug!(
+            collector = %ctx.name,
+            duration_ms,
+            "Collection succeeded"
+        );
+        // Do not record successful events to the database to avoid noise
+        return;
     }
 
-    let event = Event {
-        id: None,
-        ts: Utc::now(),
-        source: format!("collector.{}", name),
-        kind,
-        severity,
-        message,
-        payload: Some(payload),
-    };
-    if let Err(e) = writer.insert_event(event) {
+    // Handle failure case
+    let e = result.unwrap_err(); // Safe because we handled Ok above
+    tracing::error!(collector = %ctx.name, error = %e, "Collection failed");
+
+    let event_source = category_to_event_source(ctx.category);
+    let event = Event::new(
+        event_source,
+        EventKind::Error,
+        EventSeverity::Error,
+        format!("Collection failed: {}", e),
+    )
+    .with_payload("collector", &ctx.name)
+    .with_payload("category", ctx.category.as_ref())
+    .with_payload("duration_ms", duration_ms.to_string())
+    .with_payload("status", "failed")
+    .with_payload("error", e.to_string());
+
+    if let Err(e) = ctx.writer.insert_event(event) {
         tracing::warn!(error = %e, "Failed to enqueue collection event");
     }
 }
@@ -337,61 +387,65 @@ async fn run_collection<C: Collector>(collector: &Arc<C>, name: &str, writer: &S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageBuilder, StorageWriter};
+    use crate::storage::{MetricSeries, MetricValue, StaticTags, StorageBuilder, StorageWriter};
 
     /// A mock collector for testing.
     struct MockCollector {
-        config: MockConfig,
-        #[allow(dead_code)]
-        writer: StorageWriter,
-    }
-
-    #[derive(Clone)]
-    struct MockConfig {
         name: String,
         schedule: Schedule,
+        writer: StorageWriter,
+        series_id: u64,
     }
 
-    impl MockConfig {
-        fn new(name: impl Into<String>) -> Self {
+    impl MockCollector {
+        fn new(name: impl Into<String>, writer: StorageWriter) -> Self {
+            let name = name.into();
+            // Compute a deterministic series_id for testing
+            let series_id = crate::storage::MetricSeries::compute_series_id(
+                MetricCategory::Custom,
+                "mock",
+                &name,
+                &StaticTags::new(),
+            );
             Self {
-                name: name.into(),
+                name,
                 schedule: Schedule::interval(Duration::from_secs(60)),
+                writer,
+                series_id,
             }
         }
     }
 
-    impl CollectorConfig for MockConfig {
+    #[async_trait::async_trait]
+    impl Collector for MockCollector {
         fn name(&self) -> &str {
             &self.name
+        }
+
+        fn category(&self) -> MetricCategory {
+            MetricCategory::Custom
         }
 
         fn schedule(&self) -> &Schedule {
             &self.schedule
         }
 
-        fn timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Collector for MockCollector {
-        type Config = MockConfig;
-
-        fn new(config: Self::Config, writer: StorageWriter) -> Self {
-            Self { config, writer }
-        }
-
-        fn category(&self) -> &str {
-            "test"
-        }
-
-        fn config(&self) -> &Self::Config {
-            &self.config
+        fn upsert_metric_series(&self) -> Result<u64, CollectorError> {
+            let series = MetricSeries::new(
+                MetricCategory::Custom,
+                "mock",
+                &self.name,
+                StaticTags::new(),
+                Some("Mock collector for testing".to_string()),
+            );
+            self.writer.upsert_metric_series(series)?;
+            Ok(self.series_id)
         }
 
         async fn collect(&self) -> Result<(), CollectorError> {
+            // Insert a simple metric value
+            let value = MetricValue::new(self.series_id, 1.0, true, 0);
+            self.writer.insert_metric_value(value)?;
             Ok(())
         }
     }
@@ -405,8 +459,7 @@ mod tests {
         let writer = handles.writer.clone();
         let registry = CollectorRegistry::new(writer.clone()).await.unwrap();
 
-        let config = MockConfig::new("test-collector");
-        let collector = MockCollector::new(config, writer);
+        let collector = MockCollector::new("test-collector", writer);
 
         // Spawn collector
         let job_id = registry.spawn(collector).await.unwrap();

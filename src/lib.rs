@@ -15,32 +15,28 @@
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use oculus::{StorageBuilder, Metric};
-//! use chrono::Utc;
+//! use oculus::{StorageBuilder, MetricSeries, MetricValue, MetricCategory, StaticTags};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Build storage layer (spawns writer actor thread)
-//!     let handles = StorageBuilder::new("./oculus.db")
-//!         .pool_size(4)
-//!         .build()?;
+//!     // Build storage layer
+//!     let handles = StorageBuilder::new("./oculus.db").build()?;
 //!
-//!     // Insert a metric (sent to writer via MPSC channel)
-//!     let metric = Metric {
-//!         ts: Utc::now(),
-//!         category: "test".to_string(),
-//!         symbol: "test.metric".to_string(),
-//!         value: 42.0,
-//!         tags: None,
-//!         success: true,
-//!         duration_ms: 0,
-//!     };
-//!     handles.writer.insert_metric(metric)?;
+//!     // Create and insert a metric
+//!     let series = MetricSeries::new(
+//!         MetricCategory::NetworkTcp,
+//!         "latency",
+//!         "127.0.0.1:6379",
+//!         StaticTags::new(),
+//!         Some("Redis latency".to_string()),
+//!     );
+//!     let value = MetricValue::new(series.series_id, 42.0, true, 15);
+//!     handles.writer.upsert_metric_series(series)?;
+//!     handles.writer.insert_metric_value(value)?;
 //!
-//!     // Query metrics (via read pool)
+//!     // Query metrics
 //!     let results = handles.metric_reader.query(Default::default())?;
 //!     println!("Found {} metrics", results.len());
 //!
-//!     // Graceful shutdown
 //!     handles.shutdown()?;
 //!     Ok(())
 //! }
@@ -53,16 +49,13 @@ pub mod storage;
 
 // Re-export storage types
 pub use storage::{
-    Event, EventKind, EventQuery, EventReader, EventSeverity, Metric, MetricQuery, MetricReader,
-    RawSqlReader, SortOrder, StorageAdmin, StorageBuilder, StorageError, StorageHandles,
-    StorageWriter,
+    DynamicTags, Event, EventKind, EventPayload, EventQuery, EventReader, EventSeverity,
+    EventSource, MetricCategory, MetricQuery, MetricReader, MetricResult, MetricSeries,
+    MetricValue, RawSqlReader, SortOrder, StaticTags, StorageAdmin, StorageBuilder, StorageError,
+    StorageHandles, StorageWriter,
 };
 
 pub use collector::{
-    Collector, CollectorConfig, CollectorError, CollectorRegistry, JobInfo, Schedule,
+    Collector, CollectorError, CollectorRegistry, JobInfo, Schedule,
     network::{TcpCollector, TcpConfig},
 };
-
-pub use config::{AppConfig, CollectorConfigEntry, ConfigError, DatabaseConfig, ServerConfig};
-
-pub use server::{AppState, create_router};

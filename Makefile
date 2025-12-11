@@ -67,21 +67,19 @@ doc-open:                             ## Build and open documentation
 # Build & Run
 # =============================================================================
 
-build:                                ## Build debug binary
+build: tailwind                       ## Build debug binary
 	@echo "Building debug binary..."
 	@$(CARGO) build $(CARGO_FLAGS)
 
-release:                              ## Build optimized release binary
+release: tailwind                     ## Build optimized release binary
 	@echo "Building release binary..."
 	@$(CARGO) build $(CARGO_FLAGS) --release
 
-install:                              ## Install binary to ~/.cargo/bin
+install: tailwind                      ## Install binary to ~/.cargo/bin
 	@echo "Installing oculus..."
 	@$(CARGO) install $(CARGO_FLAGS) --path .
-
-run:                                  ## Run (use ARGS="..." for arguments)
+run: tailwind                          ## Run (use ARGS="..." for arguments)
 	@$(CARGO) run $(CARGO_FLAGS) -- $(ARGS)
-
 # =============================================================================
 # Assets
 # =============================================================================

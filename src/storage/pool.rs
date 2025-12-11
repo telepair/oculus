@@ -1,32 +1,43 @@
-//! Reader connection pool using r2d2.
+//! Reader connection pool using try_clone().
+//!
+//! DuckDB connections created via `try_clone()` share the same underlying database instance,
+//! enabling readers to see writes immediately without waiting for WAL checkpoint.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use duckdb::DuckdbConnectionManager;
-use r2d2::{Pool, PooledConnection};
+use duckdb::Connection;
 
 use crate::storage::StorageError;
 
 /// Connection pool for concurrent read operations.
+///
+/// Uses `try_clone()` from a parent connection to ensure all connections share
+/// the same DuckDB database instance, providing immediate write visibility.
 pub struct ReadPool {
-    pool: Pool<DuckdbConnectionManager>,
+    /// Parent connection used for cloning.
+    parent: Mutex<Connection>,
 }
 
 impl ReadPool {
-    /// Create a new read pool.
+    /// Create a new read pool from a parent connection.
     ///
-    /// Note: Schema is expected to be initialized by the writer actor before this is called.
-    pub fn new(db_path: &Path, size: u32) -> Result<Arc<Self>, StorageError> {
-        let manager = DuckdbConnectionManager::file(db_path)?;
-        let pool = Pool::builder().max_size(size).build(manager)?;
-
-        Ok(Arc::new(Self { pool }))
+    /// The parent connection should be cloned from the writer's connection
+    /// to ensure they share the same database instance.
+    pub fn new(parent_conn: Connection) -> Arc<Self> {
+        Arc::new(Self {
+            parent: Mutex::new(parent_conn),
+        })
     }
 
     /// Get a connection from the pool.
-    pub fn get(&self) -> Result<PooledConnection<DuckdbConnectionManager>, StorageError> {
-        Ok(self.pool.get()?)
+    ///
+    /// Each call creates a new cloned connection that shares the same
+    /// underlying database instance as the writer.
+    pub fn get(&self) -> Result<Connection, StorageError> {
+        let parent = self.parent.lock().map_err(|e| {
+            StorageError::Internal(format!("Failed to lock parent connection: {}", e))
+        })?;
+        parent.try_clone().map_err(StorageError::from)
     }
 }
 
@@ -42,17 +53,17 @@ mod tests {
         let db_path = dir.path().join("test.db");
 
         // Create the database file first with schema
-        let conn = duckdb::Connection::open(&db_path).unwrap();
-        init_schema(&conn).unwrap();
-        drop(conn);
+        let parent_conn = Connection::open(&db_path).unwrap();
+        init_schema(&parent_conn).unwrap();
 
-        let pool = ReadPool::new(&db_path, 4).unwrap();
+        // Create pool from parent connection
+        let pool = ReadPool::new(parent_conn);
         let conn = pool.get().unwrap();
 
         // Verify we can execute queries
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'metrics'",
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'metric_series'",
                 [],
                 |row| row.get(0),
             )

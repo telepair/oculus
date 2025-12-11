@@ -3,14 +3,46 @@
 //! This binary runs the complete Oculus monitoring system.
 //! Core functionality is provided by the `oculus` library crate.
 
+use clap::Parser;
 use oculus::{
-    AppConfig, AppState, Collector, CollectorRegistry, Schedule, StorageBuilder, TcpCollector,
-    TcpConfig, create_router,
+    collector::network::{TcpCollector, TcpConfig},
+    collector::{CollectorRegistry, Schedule},
+    config::{AppConfig, parse_duration},
+    server::{AppState, create_router},
+    storage::{Event, EventKind, EventSeverity, EventSource, StorageBuilder},
 };
-use std::env;
 use std::net::SocketAddr;
-use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Oculus - Unified Telemetry System
+#[derive(Parser, Debug)]
+#[command(name = "oculus", version, about, long_about = None)]
+struct Cli {
+    /// Path to configuration file
+    #[arg(
+        short,
+        long,
+        default_value = "configs/config.yaml",
+        env = "OCULUS_CONFIG"
+    )]
+    config: String,
+
+    /// Server bind address (overrides config file)
+    #[arg(long, env = "OCULUS_SERVER_BIND")]
+    server_bind: Option<String>,
+
+    /// Server port (overrides config file)
+    #[arg(long, env = "OCULUS_SERVER_PORT")]
+    server_port: Option<u16>,
+
+    /// Database path (overrides config file)
+    #[arg(long, env = "OCULUS_DB_PATH")]
+    db_path: Option<String>,
+
+    /// Database pool size (overrides config file)
+    #[arg(long, env = "OCULUS_DB_POOL_SIZE")]
+    db_pool_size: Option<u32>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,13 +57,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Oculus - Unified Telemetry System");
 
-    // Load configuration
-    let config_path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "configs/config.yaml".to_string());
+    // Parse CLI arguments
+    let cli = Cli::parse();
 
-    tracing::info!("Loading configuration from: {}", config_path);
-    let config = AppConfig::load(&config_path)?;
+    // Load configuration from file
+    tracing::info!("Loading configuration from: {}", cli.config);
+    let mut config = AppConfig::load(&cli.config)?;
+
+    // Apply CLI/env overrides (CLI > ENV > config file)
+    if let Some(bind) = cli.server_bind {
+        config.server.bind = bind;
+    }
+    if let Some(port) = cli.server_port {
+        config.server.port = port;
+    }
+    if let Some(path) = cli.db_path {
+        config.database.path = path;
+    }
+    if let Some(pool_size) = cli.db_pool_size {
+        config.database.pool_size = pool_size;
+    }
 
     tracing::info!(
         "Server: {}:{}, Database: {}, Collectors: {}",
@@ -43,9 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build storage layer
     tracing::info!("Initializing storage...");
+    let checkpoint_interval = parse_duration(&config.database.checkpoint_interval)?;
     let handles = StorageBuilder::new(&config.database.path)
         .pool_size(config.database.pool_size)
         .channel_capacity(config.database.channel_capacity)
+        .checkpoint_interval(checkpoint_interval)
         .build()?;
 
     tracing::info!("Storage initialized at: {}", config.database.path);
@@ -55,47 +102,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = CollectorRegistry::new(handles.writer.clone()).await?;
     registry.start().await?;
 
+    // Emit service started event
+    if let Err(e) = handles.writer.insert_event(Event::new(
+        EventSource::System,
+        EventKind::System,
+        EventSeverity::Info,
+        "Service started",
+    )) {
+        tracing::warn!("Failed to emit service start event: {}", e);
+    }
+
     // Spawn collectors from configuration
     for collector_config in &config.collectors {
-        if collector_config.collector_type == "tcp" {
-            // Parse interval and timeout
-            let interval = parse_duration(&collector_config.interval)?;
-            let timeout = parse_duration(&collector_config.timeout)?;
+        match collector_config.collector_type {
+            oculus::MetricCategory::NetworkTcp => {
+                // Parse timeout
+                let timeout = parse_duration(&collector_config.timeout)?;
 
-            // Parse target address
-            let target = collector_config.target.parse().map_err(|e| {
-                format!(
-                    "Invalid target address '{}': {}",
-                    collector_config.target, e
-                )
-            })?;
+                // Parse schedule (interval or cron)
+                let schedule = if let Some(ref interval) = collector_config.interval {
+                    Schedule::interval(parse_duration(interval)?)
+                } else if let Some(ref cron_expr) = collector_config.cron {
+                    Schedule::cron(cron_expr).map_err(|e| format!("Invalid cron: {}", e))?
+                } else {
+                    return Err("Collector must have either 'interval' or 'cron'".into());
+                };
 
-            // Create TCP collector config
-            let tcp_config = TcpConfig::new(&collector_config.name, target)
-                .with_schedule(Schedule::interval(interval))
-                .with_timeout(timeout);
+                // Parse target address
+                let target = collector_config.target.parse().map_err(|e| {
+                    format!(
+                        "Invalid target address '{}': {}",
+                        collector_config.target, e
+                    )
+                })?;
 
-            // Create and spawn collector
-            let collector = TcpCollector::new(tcp_config, handles.writer.clone());
-            registry.spawn(collector).await.map_err(|e| {
-                format!(
-                    "Failed to spawn collector '{}': {}",
-                    collector_config.name, e
-                )
-            })?;
+                // Create TCP collector config with tags
+                let tcp_config = TcpConfig::new(&collector_config.name, target)
+                    .with_schedule(schedule.clone())
+                    .with_timeout(timeout)
+                    .with_static_tags(collector_config.tags.clone());
 
-            tracing::info!(
-                "Spawned collector: {} (tcp, target={}, interval={:?})",
-                collector_config.name,
-                collector_config.target,
-                interval
-            );
-        } else {
-            tracing::warn!(
-                "Unknown collector type '{}' for collector '{}', skipping",
-                collector_config.collector_type,
-                collector_config.name
-            );
+                // Create and spawn collector
+                let collector = TcpCollector::new(tcp_config, handles.writer.clone());
+                registry.spawn(collector).await.map_err(|e| {
+                    format!(
+                        "Failed to spawn collector '{}': {}",
+                        collector_config.name, e
+                    )
+                })?;
+
+                tracing::info!(
+                    "Spawned collector: {} (tcp, target={}, schedule={})",
+                    collector_config.name,
+                    collector_config.target,
+                    schedule
+                );
+            }
+            other => {
+                tracing::warn!(
+                    "Unsupported collector type '{:?}' for collector '{}', skipping",
+                    other,
+                    collector_config.name
+                );
+            }
         }
     }
 
@@ -125,26 +194,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Parse duration string (e.g., "30s", "1m", "5m").
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("duration string is empty".to_string());
-    }
-
-    let (num_str, unit) = s.split_at(s.len() - 1);
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number: {}", num_str))?;
-
-    match unit {
-        "s" => Ok(Duration::from_secs(num)),
-        "m" => Ok(Duration::from_secs(num * 60)),
-        "h" => Ok(Duration::from_secs(num * 3600)),
-        _ => Err(format!("invalid unit: {}. Use 's', 'm', or 'h'", unit)),
-    }
-}
-
 /// Setup graceful shutdown signal handler.
 async fn shutdown_signal(registry: CollectorRegistry, handles: oculus::StorageHandles) {
     let ctrl_c = async {
@@ -171,6 +220,16 @@ async fn shutdown_signal(registry: CollectorRegistry, handles: oculus::StorageHa
         _ = terminate => {
             tracing::info!("Received terminate signal");
         }
+    }
+
+    // Emit service stopping event
+    if let Err(e) = handles.writer.insert_event(Event::new(
+        EventSource::System,
+        EventKind::System,
+        EventSeverity::Info,
+        "Service stopping",
+    )) {
+        tracing::warn!("Failed to emit service stop event: {}", e);
     }
 
     tracing::info!("Shutting down collectors...");

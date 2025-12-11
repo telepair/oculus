@@ -15,8 +15,10 @@ chrono = "0.4"
 ## Basic Usage
 
 ```rust
-use oculus::{StorageBuilder, Metric, MetricReader};
-use chrono::Utc;
+use oculus::{
+    StorageBuilder, MetricCategory, MetricSeries, MetricValue, StaticTags,
+    MetricQuery, EventQuery,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build storage (spawns writer actor thread)
@@ -25,21 +27,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .channel_capacity(1024) // Writer command queue size
         .build()?;
 
-    // Insert metrics via unified writer facade
-    handles.writer.insert_metric(Metric {
-        ts: Utc::now(),
-        category: "custom".to_string(),
-        symbol: "my.metric".to_string(),
-        value: 42.0,
-        tags: None,
-        success: true,
-    })?;
+    // Create a metric series (dimension data)
+    let series = MetricSeries::new(
+        MetricCategory::Custom,
+        "my.metric",              // name
+        "target-1",               // target
+        StaticTags::new(),        // static tags for identity
+        Some("My metric".into()), // description
+    );
+    let series_id = series.series_id;
+    handles.writer.upsert_metric_series(series)?;
+
+    // Insert metric values (time-series data)
+    let value = MetricValue::new(series_id, 42.0, true, 15);
+    handles.writer.insert_metric_value(value)?;
 
     // Force WAL checkpoint for immediate read visibility
     handles.admin.checkpoint()?;
 
     // Query via reader facade
-    let results = handles.metric_reader.query(Default::default())?;
+    let results = handles.metric_reader.query(MetricQuery::default())?;
     println!("Found {} metrics", results.len());
 
     // Graceful shutdown
@@ -54,32 +61,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Facade | Methods | Description |
 |--------|---------|-------------|
-| `StorageWriter` | `insert_metric()`, `insert_metrics()` | Write metrics |
-| | `insert_event()`, `insert_events()` | Write events |
+| `StorageWriter` | `upsert_metric_series()` | Upsert metric series (deduped by series_id) |
+| | `insert_metric_value()` | Insert metric value (batched) |
+| | `insert_event()` | Insert event (immediate) |
+| | `flush()` | Force flush buffered data |
+| | `dropped_metrics()` | Get count of dropped metrics |
 
 ### Readers (r2d2 Connection Pool)
 
 | Facade | Methods | Description |
 |--------|---------|-------------|
-| `MetricReader` | `query(MetricQuery)` | Query metrics with filters |
+| `MetricReader` | `query(MetricQuery)` | Query metrics (series + values JOIN) |
 | `EventReader` | `query(EventQuery)` | Query events with filters |
-| `RawSqlReader` | `execute(sql)` | Execute raw SQL queries |
+| `RawSqlReader` | `execute(sql)` | Execute raw SELECT queries |
 
 ### Admin
 
 | Facade | Methods | Description |
 |--------|---------|-------------|
-| `StorageAdmin` | `cleanup_metrics()`, `cleanup_events()`, `checkpoint()`, `shutdown()` | Maintenance operations |
+| `StorageAdmin` | `cleanup_metric_values()` | Delete old metric values |
+| | `cleanup_events()` | Delete old events |
+| | `checkpoint()` | Force WAL checkpoint |
+| | `shutdown()` | Graceful shutdown |
+
+## Data Types
+
+### MetricSeries
+
+Static dimension data identified by `series_id` (xxhash64 of category, name, target, static_tags).
+
+```rust
+let series = MetricSeries::new(
+    MetricCategory::NetworkTcp,
+    "latency",
+    "127.0.0.1:6379",
+    StaticTags::new(),
+    Some("Redis latency".into()),
+);
+```
+
+### MetricValue
+
+Time-series data point linked to a series.
+
+```rust
+let value = MetricValue::new(series_id, 42.5, true, 15)
+    .with_tag("status_code", "200")
+    .with_tag("path", "/api/v1");
+```
+
+### Event
+
+Structured event with source, kind, severity.
+
+```rust
+use oculus::{Event, EventSource, EventKind, EventSeverity};
+
+let event = Event::new(
+    EventSource::System,
+    EventKind::System,
+    EventSeverity::Info,
+    "Application started",
+).with_payload("version", "1.0.0");
+
+handles.writer.insert_event(event)?;
+```
 
 ## Query Examples
 
 ```rust
-use oculus::facades::{MetricQuery, SortOrder};
+use oculus::{MetricQuery, EventQuery, SortOrder, MetricCategory};
 use chrono::{Utc, Duration};
 
-// Query recent crypto metrics
+// Query recent TCP metrics
 let results = handles.metric_reader.query(MetricQuery {
-    category: Some("crypto".to_string()),
+    category: Some(MetricCategory::NetworkTcp),
     start: Some(Utc::now() - Duration::hours(1)),
     limit: Some(50),
     order: Some(SortOrder::Desc),
@@ -88,7 +144,10 @@ let results = handles.metric_reader.query(MetricQuery {
 
 // Raw SQL query
 let rows = handles.raw_sql_reader.execute(
-    "SELECT symbol, AVG(value) as avg FROM metrics GROUP BY symbol"
+    "SELECT s.name, AVG(v.value) as avg
+     FROM metric_values v
+     JOIN metric_series s ON v.series_id = s.series_id
+     GROUP BY s.name"
 )?;
 ```
 
@@ -99,21 +158,21 @@ All operations return `Result<T, StorageError>`:
 ```rust
 use oculus::StorageError;
 
-match handles.writer.insert_metric(metric) {
+match handles.writer.insert_metric_value(value) {
     Ok(()) => println!("Inserted"),
-    Err(StorageError::ChannelSend) => eprintln!("Writer actor not running"),
+    Err(StorageError::ChannelSend) => eprintln!("Channel full or closed"),
     Err(StorageError::Database(e)) => eprintln!("DuckDB error: {e}"),
     Err(e) => eprintln!("Other error: {e}"),
 }
 ```
 
-## Architecture Notes
+## Architecture
 
 ```text
 ┌──────────────────┐     MPSC Channel     ┌──────────────────┐
-│  StorageWriter   │ ──────────────────▶  │    DbActor       │
+│  StorageWriter   │ ──────────────────►  │    DbActor       │
 │  StorageAdmin    │                      │  (Single Writer) │
-│                  │                      │                  │
+│                  │                      │  + Appender      │
 └──────────────────┘                      └────────┬─────────┘
                                                    │
                                                    ▼
@@ -126,4 +185,5 @@ match handles.writer.insert_metric(metric) {
 
 - **Write path**: Commands sent via sync MPSC to dedicated writer thread (uses DuckDB Appender for high throughput)
 - **Read path**: r2d2 connection pool for concurrent reads
+- **Batching**: `MetricValue` inserts are buffered (500 items or 1 second)
 - **Visibility**: Call `checkpoint()` after writes to ensure read visibility (DuckDB WAL)
