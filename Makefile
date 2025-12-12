@@ -22,7 +22,7 @@ TAILWIND_CONTENT := "templates/**/*.html src/**/*.rs"
 # =============================================================================
 
 ## Primary Targets
-all: fmt lint check test build        ## Run full CI pipeline
+all: fmt lint check test doc build    ## Run full CI pipeline
 
 ## Code Quality
 fmt:                                  ## Format code with rustfmt

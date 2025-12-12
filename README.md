@@ -1,37 +1,51 @@
 # Oculus
 
-Unified Telemetry • Single Binary • No-Build Web
+Value Monitoring • Single Binary • Zero Dependencies
 
 [![Crates.io](https://img.shields.io/crates/v/oculus.svg)](https://crates.io/crates/oculus)
 [![Documentation](https://docs.rs/oculus/badge.svg)](https://docs.rs/oculus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Oculus is a lightweight, high-performance monitoring and observability system that bridges the gap between traditional infrastructure monitoring (like Prometheus) and financial market tracking (like TradingView).
+Oculus is an out-of-the-box value monitoring software designed for individuals and small teams. Written in Rust, single binary, zero external dependencies.
 
-> ⚠️ **Status**: v0.1.0 (Genesis / MVP) - Under active development  
-> 🛑 **Scope Note**: v0.1.0 is single-user; no user/account/role management.
+> - ⚠️ **Status**: v0.1.0 (Genesis / MVP) - Under active development
+> - 🛑 **Scope Note**: v0.1.0 is single-user; no user/account/role management.
 
 ## Features
 
-- 🚀 **Single Binary** - Zero external dependencies, runs anywhere
-- 📊 **Unified Metrics** - Network probes, crypto, stocks, and prediction markets in one place
+- 🚀 **Zero Dependencies** - Single binary, runs anywhere
+- 📊 **Unified Value Monitoring** - Crypto, stocks, prediction markets, network metrics in one place
 - ⚡ **High Performance** - Rust + DuckDB for low latency and minimal resource usage
 - 🌐 **No-Build Web UI** - HTMX-powered dashboard, no JavaScript build step
-- 🔔 **Smart Alerts** - Rule engine with simple YAML configs and raw SQL support
-- 📬 **Multi-Channel Notifications** - Log, Email, Telegram, Discord, Slack
+- 🔔 **Rule Engine** - Calculate derived values, trigger alerts with YAML configs and raw SQL
+- 📬 **Multi-Channel Notifications** - Log, Email, Telegram, Discord, Slack, Webhook
+- 🎯 **Actions** - HTTP POST triggers for automation
 
 > 📖 See [PRD](docs/PRD.md) for detailed functional requirements.
+
+## Supported Value Types
+
+| Category               | Examples                                 | Description                             |
+| ---------------------- | ---------------------------------------- | --------------------------------------- |
+| **Cryptocurrency**     | BTC, ETH                                 | Asset prices from exchanges             |
+| **Stock Market**       | TSLA, GOOGL, SPY, QQQ                    | Stock and index prices                  |
+| **Prediction Markets** | Polymarket                               | Event contract prices and odds          |
+| **Market Indicators**  | Fear Index, S&P Multiples, Altcoin Index | Sentiment and valuation metrics         |
+| **Network Metrics**    | HTTP, TCP, Ping                          | Response time, status codes, latency    |
+| **Custom Values**      | RESTful API                              | Any numeric value via generic collector |
 
 ## Architecture
 
 ```text
-Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Presentation/Notifications
+Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Notifications/Actions
     │                              │              │                    │
-    ├─ Network Probes              └─ Single      ├─ Simple Rules      ├─ Web UI (HTMX)
-    ├─ Crypto Markets                  Writer        (YAML/TOML)       ├─ REST API
-    ├─ Stock Markets                              ├─ Complex Rules     ├─ Telegram
-    ├─ Prediction Markets                            (Raw SQL)         ├─ Discord
-    └─ Custom Collectors                                               └─ Slack
+    ├─ Crypto Prices               └─ Single      ├─ Simple Rules      ├─ Log
+    ├─ Stock Prices                    Writer        (YAML/TOML)       ├─ Email
+    ├─ Prediction Markets                         ├─ Complex Rules     ├─ Telegram
+    ├─ Market Indicators                             (Raw SQL)         ├─ Discord
+    ├─ Network Probes (HTTP/TCP/Ping)                                  ├─ Slack
+    └─ Generic API Collector                                           ├─ Webhook
+                                                                       └─ HTTP POST Action
 ```
 
 > 📖 See [PRD](docs/PRD.md) for detailed logical architecture and component overview.
@@ -94,14 +108,34 @@ Oculus uses a YAML configuration file for collectors and rules:
 ```yaml
 # Example: configs/config.yaml
 collectors:
-  - type: network
-    probe: ping
-    target: 8.8.8.8
-    interval: 30s
-
+  # Crypto price collector
   - type: crypto
     asset: btc_usd
     source: coingecko
+    interval: 60s
+
+  # Stock price collector
+  - type: stock
+    symbol: TSLA
+    source: yahoo
+    interval: 5m
+
+  # Polymarket collector
+  - type: polymarket
+    market_id: some-market-id
+    interval: 30s
+
+  # Network probe
+  - type: network.http
+    target: https://api.example.com/health
+    interval: 30s
+
+  # Generic API collector (RESTful)
+  - type: api
+    name: custom_metric
+    url: https://api.example.com/v1/data
+    method: GET
+    json_path: $.data.value
     interval: 60s
 
 rules:
@@ -109,6 +143,25 @@ rules:
     condition: "crypto.price.btc_usd > 100000"
     severity: info
     channels: [telegram, log]
+
+  - name: api_slow_response
+    condition: "network.http.api_example.rtt > 1000"
+    severity: warn
+    channels: [slack, webhook]
+    action:
+      type: http_post
+      url: https://automation.example.com/trigger
+
+notifications:
+  telegram:
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+
+  webhook:
+    url: https://hooks.example.com/notify
+
+  slack:
+    webhook_url: ${SLACK_WEBHOOK_URL}
 ```
 
 ## API Endpoints
@@ -178,11 +231,11 @@ cargo run --bin oculus
 ### Collector Layer
 
 - [ ] Core collector trait and MPSC channel pipeline
-- [ ] Network Probe: Ping, TCP, HTTP health checks
-- [ ] Crypto Market: Asset price, Fear & Greed Index, MVRV
-- [ ] Stock Market: Stock price, index data
+- [ ] Crypto Market: Asset price (BTC, ETH), Fear & Greed Index, MVRV
+- [ ] Stock Market: Stock price, index data (SPY, QQQ)
 - [ ] Prediction Market: Polymarket integration
-- [ ] Custom collector plugin interface
+- [ ] Network Probe: HTTP RTT and status code checks
+- [ ] Generic API Collector: RESTful API with JSON path extraction
 
 ### Storage Layer
 
@@ -195,6 +248,7 @@ cargo run --bin oculus
 
 - [ ] Simple rules: YAML/TOML-based threshold alerts
 - [ ] Complex rules: Raw SQL with scheduled execution
+- [ ] Derived value calculation
 - [ ] Event emitter for rule triggers
 
 ### Presentation Layer
@@ -212,6 +266,11 @@ cargo run --bin oculus
 - [ ] Telegram bot integration
 - [ ] Discord webhook support
 - [ ] Slack webhook support
+- [ ] Generic webhook support
+
+### Action Layer
+
+- [ ] HTTP POST action trigger
 
 ### Infrastructure
 
@@ -236,4 +295,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Oculus** - _See everything, miss nothing._
+**Oculus** - _Monitor any value, miss nothing._

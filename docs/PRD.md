@@ -1,24 +1,41 @@
 # Oculus Product Requirements Document (PRD)
 
-| Metadata        | Value                                          |
-| --------------- | ---------------------------------------------- |
-| Project         | Oculus (Repository: telepair/oculus)           |
-| Version         | v0.1.0 (Genesis / MVP)                         |
-| Status          | Confirmed / Ready for Development              |
-| Last Updated    | 2025-12-09                                     |
-| Core Philosophy | Unified Telemetry, Single Binary, No-Build Web |
+| Metadata        | Value                                              |
+| --------------- | -------------------------------------------------- |
+| Project         | Oculus (Repository: telepair/oculus)               |
+| Version         | v0.1.0 (Genesis / MVP)                             |
+| Status          | Confirmed / Ready for Development                  |
+| Last Updated    | 2025-12-12                                         |
+| Core Philosophy | Value Monitoring, Single Binary, Zero Dependencies |
 
 ---
 
 ## 1. Executive Summary
 
-Oculus is a lightweight, high-performance monitoring and observability system. It bridges the gap between traditional infrastructure monitoring (like Prometheus) and financial market tracking (like TradingView).
+Oculus is an out-of-the-box value monitoring software designed for individuals and small teams. Written in Rust with zero external dependencies. It provides unified monitoring for various numeric values including cryptocurrency prices, stock market data, prediction market odds, and network metrics.
+
+**Core Value Proposition:**
+
+- **Value Monitoring**: Track any numeric value with a unified interface
+- **Zero Dependencies**: Single binary, runs anywhere
+- **Target Audience**: Individuals and small teams
+
+**Value Types Supported:**
+
+| Category           | Examples                                             |
+| ------------------ | ---------------------------------------------------- |
+| Cryptocurrency     | BTC price, ETH price                                 |
+| Stock Market       | TSLA, GOOGL, SPY, QQQ                                |
+| Prediction Markets | Polymarket prices                                    |
+| Market Indicators  | Fear Index, S&P Multiples, Altcoin Speculation Index |
+| Network Metrics    | HTTP RTT, HTTP Status Code                           |
+| Custom Values      | Any RESTful API endpoint                             |
 
 **v0.1.0 Goals:**
 
 - Validate the "Rust + DuckDB + HTMX" tech stack
 - Build a zero-dependency single binary application
-- Complete the data pipeline: Collection → Persistence → [Rule Engine] → Real-time Web Display
+- Complete the data pipeline: Collection → Persistence → [Rule Engine] → Notifications/Actions
 - Explicitly **out of scope** for v0.1.0: any user/account/role management.
 
 ---
@@ -44,20 +61,20 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 │                              COLLECTOR LAYER                                     │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐               │
-│  │  Network Probe  │   │  Crypto Market  │   │  Stock Market   │               │
-│  │  - Ping         │   │  - Asset Price  │   │  - Stock Price  │               │
-│  │  - TCP          │   │  - Fear & Greed │   │  - Index Data   │               │
-│  │  - HTTP         │   │  - MVRV Z-Score │   │  - Sector Stats │               │
-│  └────────┬────────┘   │  - Altcoin Idx  │   └────────┬────────┘               │
-│           │            │  - MA 30/60     │            │                         │
-│           │            └────────┬────────┘            │                         │
+│  │  Crypto Market  │   │  Stock Market   │   │ Prediction Mkt  │               │
+│  │  - BTC/ETH      │   │  - TSLA/GOOGL   │   │  - Polymarket   │               │
+│  │  - Fear Index   │   │  - SPY/QQQ      │   │  - Event Odds   │               │
+│  │  - MVRV Z-Score │   │  - Index Data   │   │                 │               │
+│  │  - Altcoin Idx  │   └────────┬────────┘   └────────┬────────┘               │
+│  └────────┬────────┘            │                     │                         │
 │           │                     │                     │                         │
 │  ┌────────┴─────────────────────┴─────────────────────┴────────┐               │
 │  │                                                              │               │
 │  │  ┌─────────────────┐              ┌─────────────────┐       │               │
-│  │  │ Prediction Mkt  │              │     Custom      │       │               │
-│  │  │  - Polymarket   │              │  - User-defined │       │               │
-│  │  │  - Odds/Prices  │              │  - Plugins      │       │               │
+│  │  │  Network Probe  │              │  Generic API    │       │               │
+│  │  │  - HTTP RTT     │              │  - RESTful API  │       │               │
+│  │  │  - HTTP Code    │              │  - JSON Path    │       │               │
+│  │  │  - TCP/Ping     │              │  - Custom Value │       │               │
 │  │  └────────┬────────┘              └────────┬────────┘       │               │
 │  │           │                                │                 │               │
 │  └───────────┴────────────────────────────────┴─────────────────┘               │
@@ -89,7 +106,7 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 │       │  (YAML/TOML Configuration)  │   │      (Raw SQL Queries)      │         │
 │       │  - Threshold alerts         │   │  - Multi-metric correlation │         │
 │       │  - Range checks             │   │  - Time-series analysis     │         │
-│       │  - Status monitors          │   │  - Custom aggregations      │         │
+│       │  - Derived values           │   │  - Custom aggregations      │         │
 │       └─────────────┬───────────────┘   └─────────────┬───────────────┘         │
 │                     │                                 │                          │
 │                     └─────────────┬───────────────────┘                          │
@@ -103,7 +120,7 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
        │                                                         │
        ▼                                                         ▼
 ┌──────────────────────────────────────┐  ┌────────────────────────────────────────┐
-│         PRESENTATION LAYER           │  │           NOTIFICATION LAYER           │
+│         PRESENTATION LAYER           │  │       NOTIFICATION / ACTION LAYER      │
 ├──────────────────────────────────────┤  ├────────────────────────────────────────┤
 │  ┌────────────┐   ┌────────────────┐ │  │  ┌─────────┐  ┌─────────┐  ┌────────┐ │
 │  │    Web     │   │      API       │ │  │  │   Log   │  │  Email  │  │  Chat  │ │
@@ -111,14 +128,17 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 │  │  - Charts  │   │  - Query       │ │  │  └─────────┘  └─────────┘  │  DC    │ │
 │  │  - Tables  │   │  - WebSocket   │ │  │                            │ Slack  │ │
 │  └────────────┘   └────────────────┘ │  │                            └────────┘ │
-│           │               │          │  │              │                │       │
-│           └───────┬───────┘          │  │              └────────┬───────┘       │
-│                   ▼                  │  │                       ▼               │
-│          ┌────────────────┐          │  │              ┌────────────────┐       │
-│          │     Axum       │          │  │              │   Dispatcher   │       │
-│          │  (Web Server)  │          │  │              │                │       │
-│          └────────────────┘          │  │              └────────────────┘       │
-└──────────────────────────────────────┘  └────────────────────────────────────────┘
+│           │               │          │  │  ┌─────────┐      ┌──────────────────┐│
+│           └───────┬───────┘          │  │  │ Webhook │      │   HTTP POST      ││
+│                   ▼                  │  │  │         │      │   Action         ││
+│          ┌────────────────┐          │  │  └─────────┘      └──────────────────┘│
+│          │     Axum       │          │  │              │                │       │
+│          │  (Web Server)  │          │  │              └────────┬───────┘       │
+│          └────────────────┘          │  │                       ▼               │
+└──────────────────────────────────────┘  │              ┌────────────────┐       │
+                                          │              │   Dispatcher   │       │
+                                          │              └────────────────┘       │
+                                          └────────────────────────────────────────┘
 ```
 
 **Concurrency Model:**
@@ -128,21 +148,24 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 
 ### 2.3 Component Overview
 
-| Layer            | Component         | Description                                           |
-| ---------------- | ----------------- | ----------------------------------------------------- |
-| **Collector**    | Network Probe     | ICMP ping, TCP connect, HTTP health checks            |
-|                  | Crypto Market     | Asset prices, Fear & Greed Index, MVRV, Altcoin Index |
-|                  | Stock Market      | Stock prices, index data, sector statistics           |
-|                  | Prediction Market | Polymarket odds and prices                            |
-|                  | Custom            | User-defined collectors via plugin interface          |
-| **Storage**      | DuckDB            | Embedded OLAP database, single-file columnar storage  |
-| **Rule Engine**  | Simple Rules      | YAML/TOML-based threshold and range checks            |
-|                  | Complex Rules     | Raw SQL for advanced multi-metric analysis            |
-| **Presentation** | Web UI            | HTMX-powered real-time dashboard                      |
-|                  | API               | REST JSON endpoints + optional WebSocket              |
-| **Notification** | Log               | Structured logging via `tracing` crate                |
-|                  | Email             | SMTP-based alerts                                     |
-|                  | Chat              | Telegram, Discord, Slack integrations                 |
+| Layer            | Component         | Description                                             |
+| ---------------- | ----------------- | ------------------------------------------------------- |
+| **Collector**    | Crypto Market     | BTC/ETH prices, Fear & Greed Index, MVRV, Altcoin Index |
+|                  | Stock Market      | Stock prices (TSLA, GOOGL), index data (SPY, QQQ)       |
+|                  | Prediction Market | Polymarket odds and prices                              |
+|                  | Network Probe     | HTTP RTT, HTTP status code, TCP connect, ICMP ping      |
+|                  | Generic API       | RESTful API with JSON path extraction                   |
+| **Storage**      | DuckDB            | Embedded OLAP database, single-file columnar storage    |
+| **Rule Engine**  | Simple Rules      | YAML/TOML-based threshold and range checks              |
+|                  | Complex Rules     | Raw SQL for advanced multi-metric analysis              |
+|                  | Derived Values    | Calculate new values from existing metrics              |
+| **Presentation** | Web UI            | HTMX-powered real-time dashboard                        |
+|                  | API               | REST JSON endpoints + optional WebSocket                |
+| **Notification** | Log               | Structured logging via `tracing` crate                  |
+|                  | Email             | SMTP-based alerts                                       |
+|                  | Chat              | Telegram, Discord, Slack integrations                   |
+|                  | Webhook           | Generic webhook for custom integrations                 |
+| **Action**       | HTTP POST         | Trigger external automation via HTTP POST               |
 
 ---
 
@@ -152,15 +175,15 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 
 ### 3.1 Core Table: `metrics`
 
-| Field    | Type        | Constraint                    | Description                                   |
-| -------- | ----------- | ----------------------------- | --------------------------------------------- |
-| ts       | TIMESTAMPTZ | NOT NULL, Index               | Timestamp when data was generated (UTC)       |
-| category | VARCHAR     | NOT NULL, default `'default'` | Logical group for aggregation/filters         |
-| symbol   | VARCHAR     | NOT NULL                      | Unique metric identifier (e.g., `sim.random`) |
-| value    | DOUBLE      | NOT NULL                      | Numeric value for aggregation                 |
-| tags     | JSON        | Nullable                      | Extended fields (e.g., `{"region": "us"}`)    |
+| Field    | Type        | Constraint                    | Description                                       |
+| -------- | ----------- | ----------------------------- | ------------------------------------------------- |
+| ts       | TIMESTAMPTZ | NOT NULL, Index               | Timestamp when data was generated (UTC)           |
+| category | VARCHAR     | NOT NULL, default `'default'` | Logical group for aggregation/filters             |
+| symbol   | VARCHAR     | NOT NULL                      | Unique metric identifier (e.g., `crypto.btc`)     |
+| value    | DOUBLE      | NOT NULL                      | Numeric value for aggregation                     |
+| tags     | JSON        | Nullable                      | Extended fields (e.g., `{"source": "coingecko"}`) |
 
-**Query Capability:** Supports `WHERE tags->>'region' = 'hk'` syntax.
+**Query Capability:** Supports `WHERE tags->>'source' = 'coingecko'` syntax.
 
 ### 3.2 Event Table: `events` (Optional)
 
@@ -187,19 +210,7 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 
 ### 4.1 Collectors
 
-#### [Collect-01] Network Probe
-
-| Probe Type | Description                                    | Output Symbol Example  |
-| ---------- | ---------------------------------------------- | ---------------------- |
-| Ping       | ICMP echo latency (ms) and packet loss (%)     | `net.ping.google.com`  |
-| TCP        | TCP connect latency to host:port               | `net.tcp.redis:6379`   |
-| HTTP       | HTTP(S) response time, status code, body match | `net.http.api.example` |
-
-- **Interval**: Configurable per-probe (default 30s)
-- **Timeout**: Per-probe timeout (default 5s)
-- **Tags**: `{"probe": "ping", "target": "8.8.8.8"}`
-
-#### [Collect-02] Crypto Market Indicators
+#### [Collect-01] Crypto Market Indicators
 
 | Indicator          | Description                                | Output Symbol Example        |
 | ------------------ | ------------------------------------------ | ---------------------------- |
@@ -207,23 +218,23 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 | Fear & Greed Index | Market sentiment indicator (0-100)         | `crypto.sentiment.fng`       |
 | MVRV Z-Score       | Market Value to Realized Value ratio       | `crypto.onchain.mvrv`        |
 | Altcoin Season Idx | Altcoin vs Bitcoin performance ratio       | `crypto.sentiment.altseason` |
-| Moving Averages    | MA30/MA60 for trend analysis               | `crypto.ma.btc_30d`          |
+| S&P Multiples      | S&P 500 valuation multiples                | `market.valuation.sp_pe`     |
 
 - **Data Sources**: CoinGecko, Glassnode, Alternative.me, etc.
 - **Rate Limiting**: Respect API quotas with exponential backoff
 
-#### [Collect-03] Stock Market Indicators
+#### [Collect-02] Stock Market Indicators
 
-| Indicator    | Description                         | Output Symbol Example |
-| ------------ | ----------------------------------- | --------------------- |
-| Stock Price  | Real-time/delayed quotes            | `stock.price.aapl`    |
-| Index Data   | Major indices (S&P500, NASDAQ, HSI) | `stock.index.spx`     |
-| Sector Stats | Sector ETF performance              | `stock.sector.xlk`    |
+| Indicator   | Description                    | Output Symbol Example |
+| ----------- | ------------------------------ | --------------------- |
+| Stock Price | Real-time/delayed quotes       | `stock.price.tsla`    |
+| Index Data  | Major indices (S&P500, NASDAQ) | `stock.index.spy`     |
+| ETF Data    | Major ETFs (QQQ, etc.)         | `stock.etf.qqq`       |
 
 - **Data Sources**: Yahoo Finance, Alpha Vantage, etc.
 - **Market Hours**: Respect trading hours, cache last value outside hours
 
-#### [Collect-04] Prediction Market Indicators
+#### [Collect-03] Prediction Market Indicators
 
 | Indicator   | Description                              | Output Symbol Example   |
 | ----------- | ---------------------------------------- | ----------------------- |
@@ -233,11 +244,45 @@ Oculus is a lightweight, high-performance monitoring and observability system. I
 - **WebSocket**: Real-time price updates when available
 - **REST Fallback**: Polling for markets without WebSocket support
 
-#### [Collect-05] Custom Collectors
+#### [Collect-04] Network Probe
 
-- **Plugin Interface**: Trait-based collector definition
-- **Configuration**: YAML/TOML for custom endpoint, interval, parsing rules
-- **Use Cases**: Internal APIs, proprietary data sources, webhooks
+| Probe Type | Description                                | Output Symbol Example  |
+| ---------- | ------------------------------------------ | ---------------------- |
+| HTTP       | HTTP(S) response time (RTT), status code   | `net.http.api.example` |
+| TCP        | TCP connect latency to host:port           | `net.tcp.redis:6379`   |
+| Ping       | ICMP echo latency (ms) and packet loss (%) | `net.ping.google.com`  |
+
+- **Interval**: Configurable per-probe (default 30s)
+- **Timeout**: Per-probe timeout (default 5s)
+- **Tags**: `{"probe": "http", "target": "https://api.example.com"}`
+
+#### [Collect-05] Generic API Collector (RESTful)
+
+| Feature   | Description                              | Example                        |
+| --------- | ---------------------------------------- | ------------------------------ |
+| URL       | Any RESTful API endpoint                 | `https://api.example.com/data` |
+| Method    | HTTP method (GET, POST)                  | `GET`                          |
+| JSON Path | Extract value using JSON path expression | `$.data.price`                 |
+| Headers   | Custom HTTP headers                      | `Authorization: Bearer xxx`    |
+| Interval  | Collection interval                      | `60s`                          |
+
+```yaml
+# Example: Generic API collector configuration
+collectors:
+  - type: api
+    name: custom_index
+    url: https://api.example.com/v1/index
+    method: GET
+    headers:
+      Authorization: "Bearer ${API_TOKEN}"
+    json_path: $.data.value
+    interval: 60s
+    tags:
+      source: example_api
+```
+
+- **Use Cases**: Internal APIs, proprietary data sources, third-party services
+- **Error Handling**: Graceful handling of network errors, invalid responses
 
 ### 4.2 Rule Engine
 
@@ -252,12 +297,15 @@ rules:
     message: "BTC crossed $100k!"
     channels: [telegram, log]
 
-  - name: api_down
-    condition: "net.http.api.example.status != 200"
+  - name: api_slow
+    condition: "net.http.api_example.rtt > 1000"
     for: 2m # Must persist for 2 minutes
-    severity: critical
-    message: "API endpoint unreachable"
-    channels: [email, slack, log]
+    severity: warn
+    message: "API response time exceeds 1s"
+    channels: [slack, webhook]
+    action:
+      type: http_post
+      url: https://automation.example.com/scale-up
 ```
 
 | Feature   | Description                                      |
@@ -266,11 +314,12 @@ rules:
 | Duration  | `for: Xm` - condition must persist for X minutes |
 | Debounce  | Prevent alert storms with cooldown period        |
 | Channels  | Route to specific notification channels          |
+| Action    | Trigger external action when rule fires          |
 
 #### [Rule-02] Complex Rules (Raw SQL)
 
 ```sql
--- Example: Detect whale accumulation pattern
+-- Example: Detect market volatility pattern
 SELECT
   symbol,
   AVG(value) as avg_price,
@@ -288,6 +337,22 @@ HAVING volatility > avg_price * 0.05
 | Scheduled Exec   | Cron-like schedule (e.g., `*/5 * * * *`)           |
 | Result Binding   | Map query results to alert templates               |
 | Parameterization | Dynamic thresholds from config                     |
+
+#### [Rule-03] Derived Values
+
+```yaml
+# Example: Calculate derived metrics
+derived:
+  - name: btc_eth_ratio
+    formula: "crypto.price.btc_usd / crypto.price.eth_usd"
+    interval: 60s
+
+  - name: portfolio_value
+    formula: "crypto.price.btc_usd * 0.5 + crypto.price.eth_usd * 10"
+    interval: 60s
+```
+
+- **Use Cases**: Portfolio tracking, ratio analysis, custom indicators
 
 ### 4.3 Presentation Layer
 
@@ -310,7 +375,7 @@ HAVING volatility > avg_price * 0.05
 
 **Visual Enhancement:**
 
-- Category-based color coding (network=blue, crypto=orange, stock=green)
+- Category-based color coding (crypto=orange, stock=green, network=blue)
 - Trend indicators (↑↓) based on recent change
 - Sparkline mini-charts for quick trend visualization
 
@@ -366,6 +431,70 @@ HAVING volatility > avg_price * 0.05
 - **Message Format**: Rich formatting with severity colors, inline charts
 - **Mention Support**: `@channel`, `@user` for critical alerts
 - **Rate Limiting**: Respect platform API limits
+
+#### [Notify-04] Webhook
+
+| Config     | Description                 |
+| ---------- | --------------------------- |
+| `url`      | Webhook endpoint URL        |
+| `method`   | HTTP method (default: POST) |
+| `headers`  | Custom HTTP headers         |
+| `template` | JSON template for payload   |
+
+```yaml
+# Example: Webhook configuration
+notifications:
+  webhook:
+    url: https://hooks.example.com/notify
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-Custom-Header: value
+    template: |
+      {
+        "event": "{{event_type}}",
+        "severity": "{{severity}}",
+        "message": "{{message}}",
+        "timestamp": "{{timestamp}}"
+      }
+```
+
+### 4.5 Action Layer
+
+#### [Action-01] HTTP POST Trigger
+
+Execute HTTP POST requests when rules fire to trigger external automation.
+
+| Config    | Description           |
+| --------- | --------------------- |
+| `url`     | Action endpoint URL   |
+| `method`  | HTTP method (POST)    |
+| `headers` | Custom HTTP headers   |
+| `body`    | Request body template |
+
+```yaml
+# Example: HTTP POST action
+rules:
+  - name: auto_scale
+    condition: "net.http.api.rtt > 2000"
+    for: 5m
+    severity: critical
+    channels: [telegram, log]
+    action:
+      type: http_post
+      url: https://automation.example.com/scale
+      headers:
+        Authorization: "Bearer ${AUTOMATION_TOKEN}"
+      body: |
+        {
+          "action": "scale_up",
+          "service": "api",
+          "reason": "High response time"
+        }
+```
+
+- **Use Cases**: Auto-scaling, incident response, pipeline triggers
+- **Retry Policy**: Configurable retry with exponential backoff
 
 ---
 
