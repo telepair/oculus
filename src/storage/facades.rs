@@ -94,6 +94,7 @@ pub struct MetricResult {
     pub description: Option<String>,
     pub ts: DateTime<Utc>,
     pub value: f64,
+    pub unit: Option<String>,
     pub success: bool,
     pub duration_ms: u32,
     pub dynamic_tags: DynamicTags,
@@ -201,7 +202,7 @@ impl MetricReader {
 
         let mut sql = String::from(
             "SELECT s.series_id, s.category::VARCHAR, s.name, s.target, s.static_tags, s.description,
-                    v.ts, v.value, v.success, v.duration_ms, v.dynamic_tags
+                    v.ts, v.value, v.unit, v.success, v.duration_ms, v.dynamic_tags
              FROM metric_values v
              JOIN metric_series s ON v.series_id = s.series_id
              WHERE v.ts >= ? AND v.ts <= ?",
@@ -243,9 +244,10 @@ impl MetricReader {
                 description: row.get(5)?,
                 ts: DateTime::from_timestamp_micros(row.get(6)?).unwrap_or(DateTime::UNIX_EPOCH),
                 value: row.get(7)?,
-                success: row.get(8)?,
-                duration_ms: row.get::<_, i64>(9)?.try_into().unwrap_or(0),
-                dynamic_tags: parse_map(&row.get::<_, Option<String>>(10)?.unwrap_or_default()),
+                unit: row.get(8)?,
+                success: row.get(9)?,
+                duration_ms: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
+                dynamic_tags: parse_map(&row.get::<_, Option<String>>(11)?.unwrap_or_default()),
             })
         })?;
 
@@ -482,7 +484,7 @@ mod tests {
             StaticTags::new(),
             Some("Redis".to_string()),
         );
-        let value = MetricValue::new(series.series_id, 42.5, true, 15);
+        let value = MetricValue::new(series.series_id, 42.5, true).with_duration_ms(15);
 
         writer.upsert_metric_series(series).unwrap();
         writer.insert_metric_value(value).unwrap();
@@ -565,11 +567,15 @@ mod tests {
 
             writer.upsert_metric_series(tcp.clone()).unwrap();
             writer
-                .insert_metric_value(MetricValue::new(tcp.series_id, 10.0, true, 5))
+                .insert_metric_value(
+                    MetricValue::new(tcp.series_id, 10.0, true).with_duration_ms(5),
+                )
                 .unwrap();
             writer.upsert_metric_series(crypto.clone()).unwrap();
             writer
-                .insert_metric_value(MetricValue::new(crypto.series_id, 100000.0, true, 50))
+                .insert_metric_value(
+                    MetricValue::new(crypto.series_id, 100000.0, true).with_duration_ms(50),
+                )
                 .unwrap();
 
             admin.checkpoint().unwrap();

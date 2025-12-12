@@ -174,7 +174,7 @@ mod tests {
                 StaticTags::new(),
                 None,
             );
-            let value = MetricValue::new(series.series_id, 123.0, true, 0);
+            let value = MetricValue::new(series.series_id, 123.0, true);
 
             writer.upsert_metric_series(series).unwrap();
             writer.insert_metric_value(value).unwrap();
@@ -222,7 +222,7 @@ mod tests {
                     StaticTags::new(),
                     None,
                 );
-                let value = MetricValue::new(series.series_id, f64::from(i), true, 0);
+                let value = MetricValue::new(series.series_id, f64::from(i), true);
                 writer.upsert_metric_series(series).unwrap();
                 writer.insert_metric_value(value).unwrap();
             }

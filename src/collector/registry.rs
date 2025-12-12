@@ -261,7 +261,7 @@ impl CollectorRegistry {
         let name = name.to_owned();
         let category = collector.category();
         let writer = self.writer.clone();
-        let schedule = collector.schedule().clone();
+        let schedule = collector.schedule();
 
         let context = Arc::new(JobContext {
             collector,
@@ -426,8 +426,8 @@ mod tests {
             MetricCategory::Custom
         }
 
-        fn schedule(&self) -> &Schedule {
-            &self.schedule
+        fn schedule(&self) -> Schedule {
+            self.schedule.clone()
         }
 
         fn upsert_metric_series(&self) -> Result<u64, CollectorError> {
@@ -444,7 +444,7 @@ mod tests {
 
         async fn collect(&self) -> Result<(), CollectorError> {
             // Insert a simple metric value
-            let value = MetricValue::new(self.series_id, 1.0, true, 0);
+            let value = MetricValue::new(self.series_id, 1.0, true);
             self.writer.insert_metric_value(value)?;
             Ok(())
         }

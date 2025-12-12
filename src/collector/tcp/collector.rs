@@ -2,7 +2,6 @@
 //!
 //! Measures TCP connection latency to a target address.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -26,34 +25,37 @@ const FAILURE_LATENCY_MS: f64 = -1.0;
 pub struct TcpConfig {
     /// Unique name for this probe instance.
     pub name: String,
-    /// Target socket address (host:port).
-    pub target_addr: SocketAddr,
+    /// Target host.
+    pub host: String,
+    /// Target port.
+    pub port: u16,
     /// Static tags for identity.
     pub static_tags: StaticTags,
     /// Human-readable description.
     pub description: Option<String>,
-    /// Execution schedule.
-    pub schedule: Schedule,
+    /// Collection interval.
+    pub interval: Duration,
     /// Connection timeout.
     pub conn_timeout: Duration,
 }
 
 impl TcpConfig {
     /// Create a new TCP probe configuration.
-    pub fn new(name: impl Into<String>, target: SocketAddr) -> Self {
+    pub fn new(name: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
         Self {
             name: name.into(),
-            target_addr: target,
-            schedule: Schedule::interval(DEFAULT_INTERVAL),
+            host: host.into(),
+            port,
+            interval: DEFAULT_INTERVAL,
             conn_timeout: DEFAULT_TIMEOUT,
             static_tags: StaticTags::new(),
             description: None,
         }
     }
 
-    /// Set the execution schedule.
-    pub fn with_schedule(mut self, schedule: Schedule) -> Self {
-        self.schedule = schedule;
+    /// Set the collection interval.
+    pub fn with_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
         self
     }
 
@@ -88,10 +90,11 @@ pub struct TcpCollector {
 impl TcpCollector {
     /// Create a new TCP collector with the given configuration and writer.
     pub fn new(config: TcpConfig, writer: StorageWriter) -> Self {
+        let target = format!("{}:{}", config.host, config.port);
         let series_id = MetricSeries::compute_series_id(
             MetricCategory::NetworkTcp,
             &config.name,
-            &config.target_addr.to_string(),
+            &target,
             &config.static_tags,
         );
 
@@ -122,16 +125,17 @@ impl Collector for TcpCollector {
         MetricCategory::NetworkTcp
     }
 
-    fn schedule(&self) -> &Schedule {
-        &self.config.schedule
+    fn schedule(&self) -> Schedule {
+        Schedule::Interval(self.config.interval)
     }
 
     fn upsert_metric_series(&self) -> Result<u64, CollectorError> {
         // Create series
+        let target = format!("{}:{}", self.config.host, self.config.port);
         let series = MetricSeries::new(
             MetricCategory::NetworkTcp,
             self.config.name.clone(),
-            self.config.target_addr.to_string(),
+            target,
             self.config.static_tags.clone(),
             self.config.description.clone(),
         );
@@ -141,12 +145,12 @@ impl Collector for TcpCollector {
     }
 
     async fn collect(&self) -> Result<(), CollectorError> {
-        let target = self.config.target_addr;
+        let target = format!("{}:{}", self.config.host, self.config.port);
         let probe_timeout = self.config.conn_timeout;
 
         // Measure connection time
         let start = Instant::now();
-        let result = timeout(probe_timeout, TcpStream::connect(target)).await;
+        let result = timeout(probe_timeout, TcpStream::connect(&target)).await;
         let elapsed = start.elapsed();
         let duration_ms = elapsed.as_millis().min(u32::MAX as u128) as u32;
 
@@ -167,8 +171,10 @@ impl Collector for TcpCollector {
         };
 
         // Create value with dynamic tags
-        let value = MetricValue::new(self.series_id, latency_ms, success, duration_ms)
-            .with_tag("schedule", self.config.schedule.to_string());
+        let value = MetricValue::new(self.series_id, latency_ms, success)
+            .with_unit("ms")
+            .with_duration_ms(duration_ms)
+            .with_tag("interval", format!("{}s", self.config.interval.as_secs()));
 
         self.writer.insert_metric_value(value)?;
         Ok(())
@@ -185,39 +191,24 @@ mod tests {
 
     #[test]
     fn test_tcp_config_defaults() {
-        let addr: SocketAddr = "127.0.0.1:6379".parse().unwrap();
-        let config = TcpConfig::new("redis", addr);
+        let config = TcpConfig::new("redis", "127.0.0.1", 6379);
 
         assert_eq!(config.name, "redis");
-        assert_eq!(config.target_addr, addr);
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 6379);
         // Verify default schedule is an interval
-        assert!(matches!(config.schedule, Schedule::Interval(d) if d == DEFAULT_INTERVAL));
+        assert_eq!(config.interval, DEFAULT_INTERVAL);
         assert_eq!(config.conn_timeout, DEFAULT_TIMEOUT);
     }
 
     #[test]
     fn test_tcp_config_builder() {
-        let addr: SocketAddr = "127.0.0.1:3306".parse().unwrap();
-        let config = TcpConfig::new("mysql", addr)
-            .with_schedule(Schedule::interval(Duration::from_secs(60)))
+        let config = TcpConfig::new("mysql", "127.0.0.1", 3306)
+            .with_interval(Duration::from_secs(60))
             .with_timeout(Duration::from_secs(10));
 
-        assert!(matches!(&config.schedule, Schedule::Interval(d) if *d == Duration::from_secs(60)));
+        assert_eq!(config.interval, Duration::from_secs(60));
         assert_eq!(config.conn_timeout, Duration::from_secs(10));
-    }
-
-    #[test]
-    fn test_tcp_config_cron() {
-        let addr: SocketAddr = "127.0.0.1:5432".parse().unwrap();
-        // 6-field cron: every 5 minutes at second 0
-        let schedule = Schedule::cron("0 */5 * * * *").expect("valid cron");
-        let config = TcpConfig::new("postgres", addr).with_schedule(schedule);
-
-        // Verify cron expression is stored correctly
-        match &config.schedule {
-            Schedule::Cron(expr) => assert_eq!(expr, "0 */5 * * * *"),
-            _ => panic!("expected Cron schedule"),
-        }
     }
 
     // =========================================================================
@@ -248,7 +239,8 @@ mod tests {
         });
 
         let handles = StorageBuilder::new(&db_path).build().unwrap();
-        let config = TcpConfig::new("test-success", addr).with_timeout(Duration::from_secs(1));
+        let config = TcpConfig::new("test-success", addr.ip().to_string(), addr.port())
+            .with_timeout(Duration::from_secs(1));
         let collector = TcpCollector::new(config, handles.writer.clone());
 
         // Upsert series first
@@ -271,10 +263,10 @@ mod tests {
         let db_path = dir.path().join("tcp_refused.db");
 
         // Use a port that is very likely to be unused (no listener)
-        let addr: SocketAddr = "127.0.0.1:59999".parse().unwrap();
 
         let handles = StorageBuilder::new(&db_path).build().unwrap();
-        let config = TcpConfig::new("test-refused", addr).with_timeout(Duration::from_millis(500));
+        let config = TcpConfig::new("test-refused", "127.0.0.1", 59999)
+            .with_timeout(Duration::from_millis(500));
         let collector = TcpCollector::new(config, handles.writer.clone());
 
         // Upsert series first
@@ -297,10 +289,10 @@ mod tests {
 
         // Use a non-routable IP (10.255.255.1) which will cause connection to hang/timeout
         // This simulates network timeout better than connection refused
-        let addr: SocketAddr = "10.255.255.1:80".parse().unwrap();
 
         let handles = StorageBuilder::new(&db_path).build().unwrap();
-        let config = TcpConfig::new("test-timeout", addr).with_timeout(Duration::from_millis(100));
+        let config = TcpConfig::new("test-timeout", "10.255.255.1", 80)
+            .with_timeout(Duration::from_millis(100));
         let collector = TcpCollector::new(config, handles.writer.clone());
 
         // Upsert series first

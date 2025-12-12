@@ -26,8 +26,7 @@ uuid = "1"
 tokio = { version = "1", features = ["full"] }
 
 # Database
-duckdb = { version = "1.4", features = ["r2d2", "bundled"] }
-r2d2 = "0.8"
+duckdb = { version = "1.4", features = ["bundled"] }
 
 # Web server
 axum = "0.7"

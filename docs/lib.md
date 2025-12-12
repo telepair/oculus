@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     handles.writer.upsert_metric_series(series)?;
 
     // Insert metric values (time-series data)
-    let value = MetricValue::new(series_id, 42.0, true, 15);
+    let value = MetricValue::new(series_id, 42.0, true);
     handles.writer.insert_metric_value(value)?;
 
     // Force WAL checkpoint for immediate read visibility
@@ -59,30 +59,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Writer (MPSC Channel → Single Writer Thread)
 
-| Facade | Methods | Description |
-|--------|---------|-------------|
+| Facade          | Methods                  | Description                                 |
+| --------------- | ------------------------ | ------------------------------------------- |
 | `StorageWriter` | `upsert_metric_series()` | Upsert metric series (deduped by series_id) |
-| | `insert_metric_value()` | Insert metric value (batched) |
-| | `insert_event()` | Insert event (immediate) |
-| | `flush()` | Force flush buffered data |
-| | `dropped_metrics()` | Get count of dropped metrics |
+|                 | `insert_metric_value()`  | Insert metric value (batched)               |
+|                 | `insert_event()`         | Insert event (immediate)                    |
+|                 | `flush()`                | Force flush buffered data                   |
+|                 | `dropped_metrics()`      | Get count of dropped metrics                |
 
-### Readers (r2d2 Connection Pool)
+### Readers (try_clone() Connection Pool)
 
-| Facade | Methods | Description |
-|--------|---------|-------------|
+| Facade         | Methods              | Description                          |
+| -------------- | -------------------- | ------------------------------------ |
 | `MetricReader` | `query(MetricQuery)` | Query metrics (series + values JOIN) |
-| `EventReader` | `query(EventQuery)` | Query events with filters |
-| `RawSqlReader` | `execute(sql)` | Execute raw SELECT queries |
+| `EventReader`  | `query(EventQuery)`  | Query events with filters            |
+| `RawSqlReader` | `execute(sql)`       | Execute raw SELECT queries           |
 
 ### Admin
 
-| Facade | Methods | Description |
-|--------|---------|-------------|
+| Facade         | Methods                   | Description              |
+| -------------- | ------------------------- | ------------------------ |
 | `StorageAdmin` | `cleanup_metric_values()` | Delete old metric values |
-| | `cleanup_events()` | Delete old events |
-| | `checkpoint()` | Force WAL checkpoint |
-| | `shutdown()` | Graceful shutdown |
+|                | `cleanup_events()`        | Delete old events        |
+|                | `checkpoint()`            | Force WAL checkpoint     |
+|                | `shutdown()`              | Graceful shutdown        |
 
 ## Data Types
 
@@ -105,7 +105,9 @@ let series = MetricSeries::new(
 Time-series data point linked to a series.
 
 ```rust
-let value = MetricValue::new(series_id, 42.5, true, 15)
+let value = MetricValue::new(series_id, 42.5, true)
+    .with_unit("ms")
+    .with_duration_ms(15)
     .with_tag("status_code", "200")
     .with_tag("path", "/api/v1");
 ```
@@ -176,7 +178,7 @@ match handles.writer.insert_metric_value(value) {
 └──────────────────┘                      └────────┬─────────┘
                                                    │
                                                    ▼
-┌──────────────────┐     r2d2 Pool        ┌──────────────────┐
+┌──────────────────┐   try_clone() Pool   ┌──────────────────┐
 │  MetricReader    │ ◀─────────────────   │    DuckDB        │
 │  EventReader     │                      │    (File)        │
 │  RawSqlReader    │                      │                  │
@@ -184,6 +186,6 @@ match handles.writer.insert_metric_value(value) {
 ```
 
 - **Write path**: Commands sent via sync MPSC to dedicated writer thread (uses DuckDB Appender for high throughput)
-- **Read path**: r2d2 connection pool for concurrent reads
+- **Read path**: try_clone() connection pool for concurrent reads
 - **Batching**: `MetricValue` inserts are buffered (500 items or 1 second)
 - **Visibility**: Call `checkpoint()` after writes to ensure read visibility (DuckDB WAL)

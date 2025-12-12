@@ -12,10 +12,6 @@ pub enum StorageError {
     #[error("database error: {0}")]
     Database(#[from] duckdb::Error),
 
-    /// Connection pool error.
-    #[error("pool error: {0}")]
-    Pool(#[from] r2d2::Error),
-
     /// Failed to send command to writer actor.
     #[error("failed to send command to writer actor")]
     ChannelSend,

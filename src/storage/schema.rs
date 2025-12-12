@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS metric_values (
     ts           BIGINT NOT NULL,
     series_id    UBIGINT NOT NULL,
     value        DOUBLE NOT NULL,
+    unit         VARCHAR,
     success      BOOLEAN NOT NULL DEFAULT true,
     duration_ms  UINTEGER,
     dynamic_tags VARCHAR DEFAULT '{}'

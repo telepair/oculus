@@ -140,6 +140,8 @@ pub struct MetricValue {
     pub series_id: u64,
     /// Numeric value.
     pub value: f64,
+    /// Unit of the value (e.g., "ms", "USD", "%", "bytes").
+    pub unit: Option<String>,
     /// Whether the collection was successful.
     pub success: bool,
     /// Collection duration in milliseconds.
@@ -150,15 +152,28 @@ pub struct MetricValue {
 
 impl MetricValue {
     /// Create a new metric value.
-    pub fn new(series_id: u64, value: f64, success: bool, duration_ms: u32) -> Self {
+    pub fn new(series_id: u64, value: f64, success: bool) -> Self {
         Self {
             ts: Utc::now(),
             series_id,
             value,
+            unit: None,
             success,
-            duration_ms,
+            duration_ms: 0,
             dynamic_tags: DynamicTags::new(),
         }
+    }
+
+    /// Set the unit of the value.
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    /// Set the duration of the collection in milliseconds.
+    pub fn with_duration_ms(mut self, duration_ms: u32) -> Self {
+        self.duration_ms = duration_ms;
+        self
     }
 
     /// Add a dynamic tag.
@@ -408,12 +423,15 @@ mod tests {
 
     #[test]
     fn test_metric_value_builder() {
-        let value = MetricValue::new(12345, 100.5, true, 15)
+        let value = MetricValue::new(12345, 100.5, true)
+            .with_unit("ms")
+            .with_duration_ms(15)
             .with_tag("status_code", "200")
             .with_tag("path", "/api/v1");
 
         assert_eq!(value.series_id, 12345);
         assert_eq!(value.value, 100.5);
+        assert_eq!(value.unit, Some("ms".to_string()));
         assert!(value.success);
         assert_eq!(value.duration_ms, 15);
         assert_eq!(

@@ -273,28 +273,31 @@ impl DbActor {
     }
 
     /// Batch insert metric values using DuckDB Appender (high volume).
-    fn insert_values_batch(&self, values: &[MetricValue]) -> Result<(), StorageError> {
+    fn insert_values_batch(&mut self, values: &[MetricValue]) -> Result<(), StorageError> {
         if values.is_empty() {
             return Ok(());
         }
 
-        let mut appender = self.conn.appender("metric_values")?;
+        let tx = self.conn.transaction()?;
+        {
+            let mut appender = tx.appender("metric_values")?;
 
-        for v in values {
-            let tags_json =
-                serde_json::to_string(&v.dynamic_tags).unwrap_or_else(|_| "{}".to_string());
-            appender.append_row(duckdb::params![
-                v.ts.timestamp_micros(),
-                v.series_id,
-                v.value,
-                v.success,
-                v.duration_ms,
-                tags_json,
-            ])?;
+            for v in values {
+                let tags_json =
+                    serde_json::to_string(&v.dynamic_tags).unwrap_or_else(|_| "{}".to_string());
+                appender.append_row(duckdb::params![
+                    v.ts.timestamp_micros(),
+                    v.series_id,
+                    v.value,
+                    v.unit.as_deref(),
+                    v.success,
+                    v.duration_ms,
+                    tags_json,
+                ])?;
+            }
+            appender.flush()?;
         }
-
-        // Explicit flush to ensure data is immediately visible to reader connections
-        appender.flush()?;
+        tx.commit()?;
 
         tracing::debug!(count = values.len(), "Values batch inserted");
         Ok(())
@@ -380,7 +383,7 @@ mod tests {
             StaticTags::new(),
             Some("Redis".to_string()),
         );
-        let value = MetricValue::new(series.series_id, 42.5, true, 15);
+        let value = MetricValue::new(series.series_id, 42.5, true).with_duration_ms(15);
 
         tx.send(Command::UpsertMetricSeries(series)).unwrap();
         tx.send(Command::InsertMetricValue(value)).unwrap();
@@ -426,7 +429,6 @@ mod tests {
             series1.series_id,
             1.0,
             true,
-            0,
         )))
         .unwrap();
         tx.send(Command::UpsertMetricSeries(series2.clone()))
@@ -435,7 +437,6 @@ mod tests {
             series2.series_id,
             2.0,
             true,
-            0,
         )))
         .unwrap();
         tx.send(Command::Flush).unwrap();
@@ -499,7 +500,7 @@ mod tests {
                 StaticTags::new(),
                 None,
             );
-            let value = MetricValue::new(series.series_id, i as f64, true, 0);
+            let value = MetricValue::new(series.series_id, i as f64, true);
             tx.send(Command::UpsertMetricSeries(series)).unwrap();
             tx.send(Command::InsertMetricValue(value)).unwrap();
         }
@@ -532,7 +533,7 @@ mod tests {
             StaticTags::new(),
             None,
         );
-        let value = MetricValue::new(series.series_id, 42.0, true, 10);
+        let value = MetricValue::new(series.series_id, 42.0, true).with_duration_ms(10);
 
         tx.send(Command::UpsertMetricSeries(series)).unwrap();
         tx.send(Command::InsertMetricValue(value)).unwrap();
@@ -570,7 +571,7 @@ mod tests {
         );
 
         // Insert metric value with current timestamp
-        let value = MetricValue::new(series.series_id, 100.0, true, 5);
+        let value = MetricValue::new(series.series_id, 100.0, true).with_duration_ms(5);
         tx.send(Command::UpsertMetricSeries(series)).unwrap();
         tx.send(Command::InsertMetricValue(value)).unwrap();
 

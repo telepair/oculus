@@ -131,7 +131,7 @@ pub trait Collector: Send + Sync + 'static {
     fn category(&self) -> MetricCategory;
 
     /// Execution schedule (interval or cron).
-    fn schedule(&self) -> &Schedule;
+    fn schedule(&self) -> Schedule;
 
     /// Upsert the metric series and return the series_id.
     ///

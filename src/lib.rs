@@ -29,7 +29,7 @@
 //!         StaticTags::new(),
 //!         Some("Redis latency".to_string()),
 //!     );
-//!     let value = MetricValue::new(series.series_id, 42.0, true, 15);
+//!     let value = MetricValue::new(series.series_id, 42.0, true);
 //!     handles.writer.upsert_metric_series(series)?;
 //!     handles.writer.insert_metric_value(value)?;
 //!
@@ -57,5 +57,5 @@ pub use storage::{
 
 pub use collector::{
     Collector, CollectorError, CollectorRegistry, JobInfo, Schedule,
-    network::{TcpCollector, TcpConfig},
+    tcp::{TcpCollector, TcpConfig},
 };

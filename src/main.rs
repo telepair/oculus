@@ -5,8 +5,8 @@
 
 use clap::Parser;
 use oculus::{
-    collector::network::{TcpCollector, TcpConfig},
-    collector::{CollectorRegistry, Schedule},
+    collector::CollectorRegistry,
+    collector::tcp::{TcpCollector, TcpConfig},
     config::{AppConfig, parse_duration},
     server::{AppState, create_router},
     storage::{Event, EventKind, EventSeverity, EventSource, StorageBuilder},
@@ -119,28 +119,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Parse timeout
                 let timeout = parse_duration(&collector_config.timeout)?;
 
-                // Parse schedule (interval or cron)
-                let schedule = if let Some(ref interval) = collector_config.interval {
-                    Schedule::interval(parse_duration(interval)?)
-                } else if let Some(ref cron_expr) = collector_config.cron {
-                    Schedule::cron(cron_expr).map_err(|e| format!("Invalid cron: {}", e))?
+                // Parse interval (TCP collector only supports interval mode)
+                let interval = if let Some(ref interval_str) = collector_config.interval {
+                    parse_duration(interval_str)?
                 } else {
-                    return Err("Collector must have either 'interval' or 'cron'".into());
+                    return Err("TCP collector requires 'interval' (cron not supported)".into());
                 };
 
-                // Parse target address
-                let target = collector_config.target.parse().map_err(|e| {
-                    format!(
-                        "Invalid target address '{}': {}",
-                        collector_config.target, e
-                    )
-                })?;
+                // Parse target address into host and port
+                let target: std::net::SocketAddr =
+                    collector_config.target.parse().map_err(|e| {
+                        format!(
+                            "Invalid target address '{}': {}",
+                            collector_config.target, e
+                        )
+                    })?;
 
                 // Create TCP collector config with tags
-                let tcp_config = TcpConfig::new(&collector_config.name, target)
-                    .with_schedule(schedule.clone())
-                    .with_timeout(timeout)
-                    .with_static_tags(collector_config.tags.clone());
+                let tcp_config = TcpConfig::new(
+                    &collector_config.name,
+                    target.ip().to_string(),
+                    target.port(),
+                )
+                .with_interval(interval)
+                .with_timeout(timeout)
+                .with_static_tags(collector_config.tags.clone());
 
                 // Create and spawn collector
                 let collector = TcpCollector::new(tcp_config, handles.writer.clone());
@@ -152,10 +155,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
 
                 tracing::info!(
-                    "Spawned collector: {} (tcp, target={}, schedule={})",
+                    "Spawned collector: {} (tcp, target={}, interval={:?})",
                     collector_config.name,
                     collector_config.target,
-                    schedule
+                    interval
                 );
             }
             other => {

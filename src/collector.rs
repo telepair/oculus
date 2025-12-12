@@ -12,21 +12,21 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use oculus::{Collector, TcpCollector, TcpConfig, Schedule, StorageBuilder};
+//! use oculus::{TcpCollector, TcpConfig, StorageBuilder};
 //! use std::time::Duration;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let handles = StorageBuilder::new("/tmp/test.db").build()?;
-//! let config = TcpConfig::new("redis-probe", "127.0.0.1:6379".parse()?)
-//!     .with_schedule(Schedule::interval(Duration::from_secs(30)));
+//! let config = TcpConfig::new("redis-probe", "127.0.0.1", 6379)
+//!     .with_interval(Duration::from_secs(30));
 //! let collector = TcpCollector::new(config, handles.writer.clone());
 //! // registry.spawn(collector);
 //! # Ok(())
 //! # }
 //! ```
 
-pub mod network;
 mod registry;
+pub mod tcp;
 mod traits;
 
 pub use registry::{CollectorRegistry, JobInfo};

@@ -2,7 +2,7 @@
 //!
 //! High-performance DuckDB storage with read/write separation:
 //! - **Writer**: Single dedicated thread with exclusive Connection using MPSC + Appender
-//! - **Reader**: r2d2 connection pool for concurrent reads
+//! - **Reader**: Connection pool using try_clone() for concurrent reads
 //!
 //! # Components
 //!
