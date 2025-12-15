@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::collector::traits::{IpValidationError, validate_ip_address};
 use crate::collector::{Collector, CollectorError, Schedule};
 use crate::storage::{MetricCategory, MetricSeries, MetricValue, StaticTags, StorageWriter};
 
@@ -35,8 +36,8 @@ pub struct TcpConfig {
     pub description: Option<String>,
     /// Collection interval.
     pub interval: Duration,
-    /// Connection timeout.
-    pub conn_timeout: Duration,
+    /// Probe timeout.
+    pub timeout: Duration,
 }
 
 impl TcpConfig {
@@ -47,10 +48,18 @@ impl TcpConfig {
             host: host.into(),
             port,
             interval: DEFAULT_INTERVAL,
-            conn_timeout: DEFAULT_TIMEOUT,
+            timeout: DEFAULT_TIMEOUT,
             static_tags: StaticTags::new(),
             description: None,
         }
+    }
+
+    /// Validate the configuration.
+    ///
+    /// Returns an error if the host is not a valid IP address.
+    pub fn validate(&self) -> Result<(), IpValidationError> {
+        validate_ip_address(&self.host)?;
+        Ok(())
     }
 
     /// Set the collection interval.
@@ -59,9 +68,9 @@ impl TcpConfig {
         self
     }
 
-    /// Set the connection timeout.
+    /// Set the probe timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.conn_timeout = timeout;
+        self.timeout = timeout;
         self
     }
 
@@ -146,7 +155,7 @@ impl Collector for TcpCollector {
 
     async fn collect(&self) -> Result<(), CollectorError> {
         let target = format!("{}:{}", self.config.host, self.config.port);
-        let probe_timeout = self.config.conn_timeout;
+        let probe_timeout = self.config.timeout;
 
         // Measure connection time
         let start = Instant::now();
@@ -198,7 +207,7 @@ mod tests {
         assert_eq!(config.port, 6379);
         // Verify default schedule is an interval
         assert_eq!(config.interval, DEFAULT_INTERVAL);
-        assert_eq!(config.conn_timeout, DEFAULT_TIMEOUT);
+        assert_eq!(config.timeout, DEFAULT_TIMEOUT);
     }
 
     #[test]
@@ -208,7 +217,7 @@ mod tests {
             .with_timeout(Duration::from_secs(10));
 
         assert_eq!(config.interval, Duration::from_secs(60));
-        assert_eq!(config.conn_timeout, Duration::from_secs(10));
+        assert_eq!(config.timeout, Duration::from_secs(10));
     }
 
     // =========================================================================

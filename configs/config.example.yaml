@@ -28,3 +28,23 @@ collectors:
     tags:
       env: local
       service: test
+
+  # ICMP ping probe (Google DNS)
+  - type: network.ping
+    name: google-dns-ping
+    target: 8.8.8.8
+    interval: 30s
+    timeout: 3s
+    tags:
+      env: production
+      service: external
+
+  # ICMP ping probe (Cloudflare DNS)
+  - type: network.ping
+    name: cloudflare-dns-ping
+    target: 1.1.1.1
+    interval: 30s
+    timeout: 3s
+    tags:
+      env: production
+      service: external

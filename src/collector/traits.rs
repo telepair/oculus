@@ -1,5 +1,6 @@
 //! Core collector traits and types.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::{StorageError, storage::MetricCategory};
@@ -33,6 +34,23 @@ pub enum CollectorError {
     /// Scheduler error.
     #[error("scheduler error: {0}")]
     Scheduler(String),
+}
+
+/// Error type for IP address validation.
+#[derive(Debug, Error)]
+pub enum IpValidationError {
+    /// Invalid IP address.
+    #[error("invalid IP address: {0}")]
+    InvalidIpAddress(String),
+}
+
+/// Validate that a host string is a valid IP address.
+///
+/// # Errors
+/// Returns `IpValidationError::InvalidIpAddress` if the host is not a valid IP address.
+pub fn validate_ip_address(host: &str) -> Result<IpAddr, IpValidationError> {
+    host.parse::<IpAddr>()
+        .map_err(|_| IpValidationError::InvalidIpAddress(host.to_string()))
 }
 
 /// Schedule for collector execution.
@@ -220,5 +238,48 @@ mod tests {
         let schedule = Schedule::cron("0 0 * * * *").unwrap();
         let display = schedule.to_string();
         assert!(display.contains("0 0 * * * *"));
+    }
+
+    // =========================================================================
+    // IP validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_ip_address_ipv4() {
+        let result = validate_ip_address("127.0.0.1");
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn test_validate_ip_address_ipv6() {
+        let result = validate_ip_address("::1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn test_validate_ip_address_invalid() {
+        let result = validate_ip_address("not-an-ip");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, IpValidationError::InvalidIpAddress(_)));
+        assert!(err.to_string().contains("not-an-ip"));
+    }
+
+    #[test]
+    fn test_validate_ip_address_hostname() {
+        // Hostnames are not valid IP addresses
+        let result = validate_ip_address("google.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_ip_address_empty() {
+        let result = validate_ip_address("");
+        assert!(result.is_err());
     }
 }

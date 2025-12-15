@@ -6,7 +6,8 @@
 use clap::Parser;
 use oculus::{
     collector::CollectorRegistry,
-    collector::tcp::{TcpCollector, TcpConfig},
+    collector::ping::PingCollector,
+    collector::tcp::TcpCollector,
     config::{AppConfig, parse_duration},
     server::{AppState, create_router},
     storage::{Event, EventKind, EventSeverity, EventSource, StorageBuilder},
@@ -116,34 +117,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for collector_config in &config.collectors {
         match collector_config.collector_type {
             oculus::MetricCategory::NetworkTcp => {
-                // Parse timeout
-                let timeout = parse_duration(&collector_config.timeout)?;
-
-                // Parse interval (TCP collector only supports interval mode)
-                let interval = if let Some(ref interval_str) = collector_config.interval {
-                    parse_duration(interval_str)?
-                } else {
-                    return Err("TCP collector requires 'interval' (cron not supported)".into());
-                };
-
-                // Parse target address into host and port
-                let target: std::net::SocketAddr =
-                    collector_config.target.parse().map_err(|e| {
-                        format!(
-                            "Invalid target address '{}': {}",
-                            collector_config.target, e
-                        )
-                    })?;
-
-                // Create TCP collector config with tags
-                let tcp_config = TcpConfig::new(
-                    &collector_config.name,
-                    target.ip().to_string(),
-                    target.port(),
-                )
-                .with_interval(interval)
-                .with_timeout(timeout)
-                .with_static_tags(collector_config.tags.clone());
+                // Use to_tcp_config() for parsing and validation
+                let tcp_config = collector_config.to_tcp_config().map_err(|e| {
+                    format!(
+                        "Failed to parse TCP collector '{}': {}",
+                        collector_config.name, e
+                    )
+                })?;
 
                 // Create and spawn collector
                 let collector = TcpCollector::new(tcp_config, handles.writer.clone());
@@ -155,10 +135,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
 
                 tracing::info!(
-                    "Spawned collector: {} (tcp, target={}, interval={:?})",
+                    "Spawned collector: {} (tcp, target={})",
                     collector_config.name,
                     collector_config.target,
-                    interval
+                );
+            }
+            oculus::MetricCategory::NetworkPing => {
+                // Use to_ping_config() for parsing and validation
+                let ping_config = collector_config.to_ping_config().map_err(|e| {
+                    format!(
+                        "Failed to parse Ping collector '{}': {}",
+                        collector_config.name, e
+                    )
+                })?;
+
+                // Create and spawn collector
+                let collector = PingCollector::new(ping_config, handles.writer.clone());
+                registry.spawn(collector).await.map_err(|e| {
+                    format!(
+                        "Failed to spawn collector '{}': {}",
+                        collector_config.name, e
+                    )
+                })?;
+
+                tracing::info!(
+                    "Spawned collector: {} (ping, target={})",
+                    collector_config.name,
+                    collector_config.target,
                 );
             }
             other => {

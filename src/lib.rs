@@ -56,6 +56,7 @@ pub use storage::{
 };
 
 pub use collector::{
-    Collector, CollectorError, CollectorRegistry, JobInfo, Schedule,
+    Collector, CollectorError, CollectorRegistry, IpValidationError, JobInfo, Schedule,
+    ping::{PingCollector, PingConfig},
     tcp::{TcpCollector, TcpConfig},
 };

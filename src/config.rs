@@ -11,7 +11,10 @@ use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::storage::MetricCategory;
+use crate::collector::ping::PingConfig;
+use crate::collector::tcp::TcpConfig;
+use crate::collector::traits::validate_ip_address;
+use crate::storage::{MetricCategory, StaticTags};
 
 /// Configuration error types.
 #[derive(Debug, Error)]
@@ -97,14 +100,14 @@ fn default_checkpoint_interval() -> String {
 /// Collector configuration entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectorConfigEntry {
-    /// Collector type - maps to MetricCategory (e.g., "network.tcp", "crypto").
+    /// Collector type - maps to MetricCategory (e.g., "network.tcp", "network.ping").
     #[serde(rename = "type")]
     pub collector_type: MetricCategory,
 
     /// Unique collector name.
     pub name: String,
 
-    /// Target endpoint (e.g., "127.0.0.1:6379", "<https://api.example.com>").
+    /// Target endpoint (e.g., "127.0.0.1:6379" for TCP, "8.8.8.8" for ping).
     pub target: String,
 
     /// Collection interval (e.g., "30s", "1m", "5m"). Mutually exclusive with `cron`.
@@ -122,6 +125,115 @@ pub struct CollectorConfigEntry {
     /// Static tags for this collector (key-value pairs).
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
+}
+
+impl CollectorConfigEntry {
+    /// Convert to TcpConfig.
+    ///
+    /// # Errors
+    /// Returns `ConfigError` if the target format is invalid (expected "host:port").
+    pub fn to_tcp_config(&self) -> Result<TcpConfig, ConfigError> {
+        // Parse target as "host:port"
+        let (host, port) = self.parse_host_port()?;
+
+        // Validate host is a valid IP address
+        validate_ip_address(&host).map_err(|e| {
+            ConfigError::ValidationError(format!("collector '{}': {}", self.name, e))
+        })?;
+
+        let timeout = self.parse_timeout()?;
+        let interval = self.parse_interval()?;
+
+        let mut config = TcpConfig::new(&self.name, host, port)
+            .with_timeout(timeout)
+            .with_interval(interval)
+            .with_static_tags(self.to_static_tags());
+
+        if let Some(desc) = self.tags.get("description") {
+            config = config.with_description(desc);
+        }
+
+        Ok(config)
+    }
+
+    /// Convert to PingConfig.
+    ///
+    /// Note: The target can be either an IP address or a hostname.
+    /// DNS resolution is handled at collect time by the PingCollector.
+    ///
+    /// # Errors
+    /// Returns `ConfigError` if the timeout or interval format is invalid.
+    pub fn to_ping_config(&self) -> Result<PingConfig, ConfigError> {
+        // Note: We don't validate IP here since PingCollector supports hostname resolution
+        let timeout = self.parse_timeout()?;
+        let interval = self.parse_interval()?;
+
+        let mut config = PingConfig::new(&self.name, &self.target)
+            .with_timeout(timeout)
+            .with_interval(interval)
+            .with_static_tags(self.to_static_tags());
+
+        if let Some(desc) = self.tags.get("description") {
+            config = config.with_description(desc);
+        }
+
+        Ok(config)
+    }
+
+    /// Parse target as "host:port".
+    fn parse_host_port(&self) -> Result<(String, u16), ConfigError> {
+        let parts: Vec<&str> = self.target.rsplitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(ConfigError::ValidationError(format!(
+                "collector '{}': target must be in 'host:port' format, got '{}'",
+                self.name, self.target
+            )));
+        }
+
+        let port: u16 = parts[0].parse().map_err(|_| {
+            ConfigError::ValidationError(format!(
+                "collector '{}': invalid port '{}'",
+                self.name, parts[0]
+            ))
+        })?;
+
+        let host = parts[1].to_string();
+        Ok((host, port))
+    }
+
+    /// Parse interval or return default.
+    fn parse_interval(&self) -> Result<Duration, ConfigError> {
+        match &self.interval {
+            Some(interval) => parse_duration(interval).map_err(|e| {
+                ConfigError::ValidationError(format!(
+                    "collector '{}': invalid interval: {}",
+                    self.name, e
+                ))
+            }),
+            None => Ok(Duration::from_secs(30)), // Default interval
+        }
+    }
+
+    /// Parse timeout.
+    fn parse_timeout(&self) -> Result<Duration, ConfigError> {
+        parse_duration(&self.timeout).map_err(|e| {
+            ConfigError::ValidationError(format!(
+                "collector '{}': invalid timeout: {}",
+                self.name, e
+            ))
+        })
+    }
+
+    /// Convert tags to StaticTags.
+    fn to_static_tags(&self) -> StaticTags {
+        let mut static_tags = StaticTags::new();
+        for (k, v) in &self.tags {
+            if k != "description" {
+                static_tags.insert(k.clone(), v.clone());
+            }
+        }
+        static_tags
+    }
 }
 
 impl AppConfig {
@@ -371,5 +483,121 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    // =========================================================================
+    // CollectorConfigEntry conversion tests
+    // =========================================================================
+
+    #[test]
+    fn test_to_tcp_config_valid() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkTcp,
+            name: "redis".to_string(),
+            target: "127.0.0.1:6379".to_string(),
+            interval: Some("30s".to_string()),
+            cron: None,
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        let config = entry.to_tcp_config().unwrap();
+        assert_eq!(config.name, "redis");
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 6379);
+        assert_eq!(config.timeout, Duration::from_secs(5));
+        assert_eq!(config.interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_to_tcp_config_invalid_host() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkTcp,
+            name: "test".to_string(),
+            target: "invalid-host:6379".to_string(),
+            interval: Some("30s".to_string()),
+            cron: None,
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        let result = entry.to_tcp_config();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid IP address")
+        );
+    }
+
+    #[test]
+    fn test_to_tcp_config_invalid_port() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkTcp,
+            name: "test".to_string(),
+            target: "127.0.0.1:not-a-port".to_string(),
+            interval: Some("30s".to_string()),
+            cron: None,
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        let result = entry.to_tcp_config();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid port"));
+    }
+
+    #[test]
+    fn test_to_ping_config_valid() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkPing,
+            name: "google-dns".to_string(),
+            target: "8.8.8.8".to_string(),
+            interval: Some("60s".to_string()),
+            cron: None,
+            timeout: "3s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        let config = entry.to_ping_config().unwrap();
+        assert_eq!(config.name, "google-dns");
+        assert_eq!(config.host, "8.8.8.8");
+        assert_eq!(config.timeout, Duration::from_secs(3));
+        assert_eq!(config.interval, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_to_ping_config_hostname_valid() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkPing,
+            name: "google".to_string(),
+            target: "google.com".to_string(), // hostname is now valid
+            interval: Some("30s".to_string()),
+            cron: None,
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        // PingCollector supports hostname resolution, so this should succeed
+        let config = entry.to_ping_config().unwrap();
+        assert_eq!(config.name, "google");
+        assert_eq!(config.host, "google.com");
+    }
+
+    #[test]
+    fn test_to_ping_config_ipv6() {
+        let entry = CollectorConfigEntry {
+            collector_type: MetricCategory::NetworkPing,
+            name: "localhost-v6".to_string(),
+            target: "::1".to_string(),
+            interval: Some("30s".to_string()),
+            cron: None,
+            timeout: "3s".to_string(),
+            tags: BTreeMap::new(),
+        };
+
+        let config = entry.to_ping_config().unwrap();
+        assert_eq!(config.host, "::1");
     }
 }

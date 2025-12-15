@@ -25,9 +25,10 @@
 //! # }
 //! ```
 
+pub mod ping;
 mod registry;
 pub mod tcp;
-mod traits;
+pub mod traits;
 
 pub use registry::{CollectorRegistry, JobInfo};
-pub use traits::{Collector, CollectorError, Schedule};
+pub use traits::{Collector, CollectorError, IpValidationError, Schedule};
