@@ -135,7 +135,6 @@
             <h2 class="text-4xl font-bold text-white mb-2 tracking-tight">
               Dashboard
             </h2>
-
           </div>
           <div class="flex gap-4">
             <div class="relative">
@@ -146,7 +145,9 @@
               >
                 <option value="1h" class="bg-neutral-900">Last 1 Hour</option>
                 <option value="6h" class="bg-neutral-900">Last 6 Hours</option>
-                <option value="12h" class="bg-neutral-900">Last 12 Hours</option>
+                <option value="12h" class="bg-neutral-900">
+                  Last 12 Hours
+                </option>
                 <option value="24h" selected class="bg-neutral-900">
                   Last 24 Hours
                 </option>
@@ -168,7 +169,7 @@
           class="glass-panel rounded-2xl p-8 mb-8 animate-fade-in"
         >
           <div
-            class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 pb-6 border-b border-white/5 gap-4"
+            class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 pb-6 border-b border-white/5 gap-4"
           >
             <div>
               <h3
@@ -181,27 +182,123 @@
                 >
               </h3>
             </div>
-            <!-- Loading Indicator for Metrics -->
-            <div
-              id="metrics-indicator"
-              class="htmx-indicator flex items-center gap-2 text-sm text-blue-400"
-            >
-              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle
-                  class="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
+            <!-- Refresh Controls -->
+            <div class="flex items-center gap-4">
+              <!-- Last Updated -->
+              <span
+                id="metrics-last-updated"
+                class="text-xs text-neutral-400"
+              ></span>
+              <!-- Auto Refresh Toggle -->
+              <label class="flex items-center gap-2 cursor-pointer">
+                <span
+                  class="text-xs text-neutral-300 font-medium uppercase tracking-wider"
+                  >Auto</span
+                >
+                <div class="relative">
+                  <input
+                    type="checkbox"
+                    id="metrics-auto-refresh"
+                    class="sr-only peer"
+                    checked
+                  />
+                  <div
+                    class="w-9 h-5 bg-neutral-700 rounded-full peer peer-checked:bg-blue-500/50 transition-colors"
+                  ></div>
+                  <div
+                    class="absolute left-0.5 top-0.5 w-4 h-4 bg-neutral-400 rounded-full peer-checked:translate-x-4 peer-checked:bg-blue-400 transition-all"
+                  ></div>
+                </div>
+              </label>
+              <!-- Manual Refresh Button -->
+              <button
+                type="button"
+                onclick="refreshMetrics()"
+                class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 transition-all"
+                title="Refresh now"
+              >
+                <svg
+                  class="w-4 h-4"
+                  fill="none"
                   stroke="currentColor"
-                  stroke-width="4"
-                ></circle>
-                <path
-                  class="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                ></path>
-              </svg>
-              Syncing...
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                Refresh
+              </button>
+              <!-- Loading Indicator for Metrics -->
+              <div
+                id="metrics-indicator"
+                class="htmx-indicator flex items-center gap-2 text-sm text-blue-400"
+              >
+                <svg
+                  class="w-4 h-4 animate-spin"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  ></circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                Syncing...
+              </div>
+            </div>
+          </div>
+
+          <!-- Statistics Cards - Horizontal Layout -->
+          <div
+            id="metrics-stats"
+            class="flex flex-wrap items-center gap-x-6 gap-y-4 mb-6 py-4 px-6 rounded-xl bg-black/20 border border-white/5"
+          >
+            <div class="flex items-center gap-3">
+              <span class="stat-label">Total</span>
+              <span class="text-xl font-bold text-white" id="stat-total"
+                >-</span
+              >
+            </div>
+            <div class="w-px h-8 bg-white/20 mx-2"></div>
+            <div class="flex items-center gap-3">
+              <span class="stat-label">Success Rate</span>
+              <span class="text-xl font-bold text-white" id="stat-success-rate"
+                >-</span
+              >
+              <div class="w-16 stat-bar">
+                <div
+                  id="stat-success-bar"
+                  class="stat-bar-fill bg-green-500"
+                  style="width: 0%"
+                ></div>
+              </div>
+            </div>
+            <div class="w-px h-8 bg-white/20 mx-2"></div>
+            <div class="flex items-center gap-3">
+              <span class="stat-label">Success</span>
+              <span class="text-xl font-bold text-green-400" id="stat-success"
+                >-</span
+              >
+            </div>
+            <div class="w-px h-8 bg-white/20 mx-2"></div>
+            <div class="flex items-center gap-3">
+              <span class="stat-label">Failure</span>
+              <span class="text-xl font-bold text-orange-400" id="stat-failure"
+                >-</span
+              >
             </div>
           </div>
 
@@ -344,7 +441,7 @@
           class="hidden glass-panel rounded-2xl p-8 mb-8 animate-fade-in"
         >
           <div
-            class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 pb-6 border-b border-white/5 gap-4"
+            class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 pb-6 border-b border-white/5 gap-4"
           >
             <div>
               <h3
@@ -357,27 +454,82 @@
                 >
               </h3>
             </div>
-            <!-- Loading Indicator for Events -->
-            <div
-              id="events-indicator"
-              class="htmx-indicator flex items-center gap-2 text-sm text-orange-400"
-            >
-              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle
-                  class="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
+            <!-- Refresh Controls -->
+            <div class="flex items-center gap-4">
+              <!-- Last Updated -->
+              <span
+                id="events-last-updated"
+                class="text-xs text-neutral-400"
+              ></span>
+              <!-- Auto Refresh Toggle -->
+              <label class="flex items-center gap-2 cursor-pointer">
+                <span
+                  class="text-xs text-neutral-300 font-medium uppercase tracking-wider"
+                  >Auto</span
+                >
+                <div class="relative">
+                  <input
+                    type="checkbox"
+                    id="events-auto-refresh"
+                    class="sr-only peer"
+                    checked
+                  />
+                  <div
+                    class="w-9 h-5 bg-neutral-700 rounded-full peer peer-checked:bg-orange-500/50 transition-colors"
+                  ></div>
+                  <div
+                    class="absolute left-0.5 top-0.5 w-4 h-4 bg-neutral-400 rounded-full peer-checked:translate-x-4 peer-checked:bg-orange-400 transition-all"
+                  ></div>
+                </div>
+              </label>
+              <!-- Manual Refresh Button -->
+              <button
+                type="button"
+                onclick="refreshEvents()"
+                class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium text-orange-400 hover:text-orange-300 hover:bg-orange-500/10 transition-all"
+                title="Refresh now"
+              >
+                <svg
+                  class="w-4 h-4"
+                  fill="none"
                   stroke="currentColor"
-                  stroke-width="4"
-                ></circle>
-                <path
-                  class="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                ></path>
-              </svg>
-              Syncing...
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                Refresh
+              </button>
+              <!-- Loading Indicator for Events -->
+              <div
+                id="events-indicator"
+                class="htmx-indicator flex items-center gap-2 text-sm text-orange-400"
+              >
+                <svg
+                  class="w-4 h-4 animate-spin"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  ></circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                Syncing...
+              </div>
             </div>
           </div>
 
@@ -424,9 +576,7 @@
                 <option value="collector.network.http" class="bg-neutral-900">
                   Collector Network HTTP
                 </option>
-                <option value="rule" class="bg-neutral-900">
-                  Rule Engine
-                </option>
+                <option value="rule" class="bg-neutral-900">Rule Engine</option>
                 <option value="system" class="bg-neutral-900">System</option>
                 <option value="other" class="bg-neutral-900">Other</option>
               </select>
@@ -622,6 +772,129 @@
           // Trigger HTMX request on the form
           htmx.trigger(input.form, "submit");
         });
+        // Also refresh stats with new range
+        loadMetricStats();
+      }
+    </script>
+
+    <script>
+      // Refresh control state
+      let metricsAutoRefresh = true;
+      let eventsAutoRefresh = true;
+
+      // Format time as HH:MM:SS
+      function formatTime(date) {
+        return date.toLocaleTimeString("en-US", { hour12: false });
+      }
+
+      // Update last refresh timestamp
+      function updateLastRefresh(module) {
+        const el = document.getElementById(`${module}-last-updated`);
+        if (el) {
+          el.textContent = `Updated ${formatTime(new Date())}`;
+        }
+      }
+
+      // Manual refresh functions
+      function refreshMetrics() {
+        htmx.trigger(document.getElementById("metrics-form"), "submit");
+        loadMetricStats();
+      }
+
+      function refreshEvents() {
+        htmx.trigger(document.getElementById("events-form"), "submit");
+      }
+
+      // Auto-refresh toggle handlers
+      document.addEventListener("DOMContentLoaded", () => {
+        const metricsToggle = document.getElementById("metrics-auto-refresh");
+        const eventsToggle = document.getElementById("events-auto-refresh");
+        const metricsForm = document.getElementById("metrics-form");
+        const eventsForm = document.getElementById("events-form");
+
+        // Store original triggers
+        const metricsTrigger = metricsForm.getAttribute("hx-trigger");
+        const eventsTrigger = eventsForm.getAttribute("hx-trigger");
+
+        metricsToggle?.addEventListener("change", (e) => {
+          metricsAutoRefresh = e.target.checked;
+          if (metricsAutoRefresh) {
+            metricsForm.setAttribute("hx-trigger", metricsTrigger);
+          } else {
+            // Remove 'every 30s' from trigger
+            metricsForm.setAttribute(
+              "hx-trigger",
+              metricsTrigger.replace(/, every 30s/g, "")
+            );
+          }
+          htmx.process(metricsForm);
+        });
+
+        eventsToggle?.addEventListener("change", (e) => {
+          eventsAutoRefresh = e.target.checked;
+          if (eventsAutoRefresh) {
+            eventsForm.setAttribute("hx-trigger", eventsTrigger);
+          } else {
+            // Remove 'every 30s' from trigger
+            eventsForm.setAttribute(
+              "hx-trigger",
+              eventsTrigger.replace(/, every 30s/g, "")
+            );
+          }
+          htmx.process(eventsForm);
+        });
+
+        // Update timestamps on successful data load
+        document.body.addEventListener("htmx:afterSwap", (event) => {
+          const target = event.detail.target;
+          if (target.id === "metrics-data") {
+            updateLastRefresh("metrics");
+          } else if (target.id === "events-data") {
+            updateLastRefresh("events");
+          }
+        });
+
+        // Load initial stats
+        loadMetricStats();
+        // Refresh stats every 30s if auto-refresh is enabled
+        setInterval(() => {
+          if (metricsAutoRefresh) {
+            loadMetricStats();
+          }
+        }, 30000);
+      });
+
+      // Load metric statistics from API
+      async function loadMetricStats() {
+        const rangeInput = document.querySelector(
+          '#metrics-form input[name="range"]'
+        );
+        const range = rangeInput ? rangeInput.value : "24h";
+
+        try {
+          const response = await fetch(`/api/metrics/stats?range=${range}`);
+          if (!response.ok) throw new Error("Failed to load stats");
+
+          const stats = await response.json();
+
+          // Update stat cards
+          document.getElementById("stat-total").textContent =
+            stats.total.toLocaleString();
+          document.getElementById("stat-success").textContent =
+            stats.success_count.toLocaleString();
+          document.getElementById("stat-failure").textContent =
+            stats.failure_count.toLocaleString();
+
+          // Calculate success rate
+          const rate =
+            stats.total > 0 ? (stats.success_count / stats.total) * 100 : 0;
+          document.getElementById(
+            "stat-success-rate"
+          ).textContent = `${rate.toFixed(1)}%`;
+          document.getElementById("stat-success-bar").style.width = `${rate}%`;
+        } catch (error) {
+          console.error("Failed to load metric stats:", error);
+        }
       }
     </script>
 

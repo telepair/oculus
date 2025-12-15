@@ -103,7 +103,7 @@
   }
 
   &::placeholder {
-      color: rgba(226, 232, 240, 0.4);
+    color: rgba(226, 232, 240, 0.4);
   }
 }
 
@@ -211,3 +211,51 @@
   }
 }
 
+/* Statistics cards */
+@utility stat-card {
+  background: linear-gradient(
+    135deg,
+    rgba(20, 28, 40, 0.9),
+    rgba(12, 16, 28, 0.95)
+  );
+  border: 1px solid var(--color-glass-border);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: var(--color-oi-sky-blue);
+    box-shadow: 0 4px 20px rgba(86, 180, 233, 0.15);
+  }
+}
+
+@utility stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: white;
+  line-height: 1;
+}
+
+@utility stat-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+@utility stat-bar {
+  height: 6px;
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+@utility stat-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}

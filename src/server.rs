@@ -59,6 +59,12 @@ pub struct EventsQueryParams {
     pub range: Option<String>,
 }
 
+/// Query parameters for metrics stats API.
+#[derive(Debug, Deserialize)]
+pub struct StatsQueryParams {
+    pub range: Option<String>,
+}
+
 /// Parse sort order from string.
 fn parse_sort_order(s: Option<String>) -> Option<SortOrder> {
     s.and_then(|order| match order.to_lowercase().as_str() {
@@ -134,6 +140,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler))
         .route("/api/metrics", get(metrics_handler))
+        .route("/api/metrics/stats", get(metrics_stats_handler))
         .route("/api/events", get(events_handler))
         .nest_service("/static", ServeDir::new("templates/static"))
         .layer(
@@ -210,6 +217,18 @@ async fn metrics_handler(
 
     match state.metric_reader.query(query) {
         Ok(metrics) => HtmlTemplate(MetricsTemplate { metrics }).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+    }
+}
+
+/// Metrics stats API endpoint - returns JSON statistics.
+async fn metrics_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<StatsQueryParams>,
+) -> Response {
+    let start = parse_range(params.range);
+    match state.metric_reader.stats(start, None) {
+        Ok(stats) => Json(stats).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
     }
 }

@@ -24,6 +24,7 @@ use crate::storage::types::{
     DynamicTags, Event, EventKind, EventSeverity, EventSource, MetricCategory, MetricSeries,
     MetricValue, StaticTags,
 };
+use serde::Serialize;
 
 // =============================================================================
 // Constants
@@ -98,6 +99,24 @@ pub struct MetricResult {
     pub success: bool,
     pub duration_ms: u32,
     pub dynamic_tags: DynamicTags,
+}
+
+/// Statistics for a single category.
+#[derive(Debug, Clone, Serialize)]
+pub struct CategoryStats {
+    pub category: String,
+    pub total: u64,
+    pub success: u64,
+    pub failure: u64,
+}
+
+/// Aggregated metric statistics grouped by category and success.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricStats {
+    pub total: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub by_category: Vec<CategoryStats>,
 }
 
 // =============================================================================
@@ -253,6 +272,81 @@ impl MetricReader {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    /// Get aggregated statistics grouped by category and success.
+    pub fn stats(
+        &self,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<MetricStats, StorageError> {
+        let conn = self.pool.get()?;
+        let now = Utc::now();
+        let start_ts = start.unwrap_or_else(|| now - Duration::days(DEFAULT_RANGE_DAYS));
+        let end_ts = end.unwrap_or(now);
+
+        let sql = "SELECT s.category::VARCHAR, v.success, COUNT(*) as cnt
+                   FROM metric_values v
+                   JOIN metric_series s ON v.series_id = s.series_id
+                   WHERE v.ts >= ? AND v.ts <= ?
+                   GROUP BY s.category, v.success
+                   ORDER BY s.category";
+
+        let mut stmt = conn.prepare(sql)?;
+        let params: [&dyn duckdb::ToSql; 2] =
+            [&start_ts.timestamp_micros(), &end_ts.timestamp_micros()];
+
+        // Collect raw rows: (category, success, count)
+        let mut raw_rows: Vec<(String, bool, u64)> = Vec::new();
+        let rows = stmt.query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        for row in rows {
+            raw_rows.push(row?);
+        }
+
+        // Aggregate into CategoryStats
+        let mut category_map: std::collections::HashMap<String, CategoryStats> =
+            std::collections::HashMap::new();
+        let mut total = 0u64;
+        let mut success_count = 0u64;
+        let mut failure_count = 0u64;
+
+        for (cat, success, cnt) in raw_rows {
+            total += cnt;
+            if success {
+                success_count += cnt;
+            } else {
+                failure_count += cnt;
+            }
+
+            let entry = category_map.entry(cat.clone()).or_insert(CategoryStats {
+                category: cat,
+                total: 0,
+                success: 0,
+                failure: 0,
+            });
+            entry.total += cnt;
+            if success {
+                entry.success += cnt;
+            } else {
+                entry.failure += cnt;
+            }
+        }
+
+        let mut by_category: Vec<CategoryStats> = category_map.into_values().collect();
+        by_category.sort_by(|a, b| a.category.cmp(&b.category));
+
+        Ok(MetricStats {
+            total,
+            success_count,
+            failure_count,
+            by_category,
+        })
     }
 }
 

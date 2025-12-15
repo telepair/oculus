@@ -22,8 +22,8 @@ mod types;
 pub use builder::{StorageBuilder, StorageHandles};
 pub use error::StorageError;
 pub use facades::{
-    EventQuery, EventReader, MetricQuery, MetricReader, MetricResult, RawSqlReader, SortOrder,
-    StorageAdmin, StorageWriter,
+    CategoryStats, EventQuery, EventReader, MetricQuery, MetricReader, MetricResult, MetricStats,
+    RawSqlReader, SortOrder, StorageAdmin, StorageWriter,
 };
 pub use types::{
     DynamicTags, Event, EventKind, EventPayload, EventSeverity, EventSource, MetricCategory,
