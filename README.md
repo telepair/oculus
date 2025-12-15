@@ -8,7 +8,7 @@ Value Monitoring • Single Binary • Zero Dependencies
 
 Oculus is an out-of-the-box value monitoring software designed for individuals and small teams. Written in Rust, single binary, zero external dependencies.
 
-> - ⚠️ **Status**: v0.1.1 - Under active development
+> - ⚠️ **Status**: v0.1.2 - Under active development
 > - 🛑 **Scope Note**: v0.1.x is single-user; no user/account/role management.
 
 ## Features
@@ -226,7 +226,7 @@ cargo run --bin oculus
 
 ## TODO
 
-> v0.1.1 milestone tasks based on [PRD](docs/PRD.md)
+> v0.1.2 milestone tasks based on [PRD](docs/PRD.md)
 
 ### Collector Layer
 
