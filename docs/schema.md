@@ -95,8 +95,8 @@ CREATE TYPE metric_category_enum AS ENUM (
 
 ```sql
 CREATE TYPE event_source_enum AS ENUM (
-    'collector.registry', 'collector.network.tcp', 'collector.network.ping',
-    'collector.network.http', 'rule.engine', 'system', 'other'
+    'collector.network.tcp', 'collector.network.ping', 'collector.network.http',
+    'rule.engine', 'system'
 );
 ```
 

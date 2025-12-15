@@ -56,9 +56,19 @@ xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
+# Regex for SQL validation
+regex = "1"
+
 # ICMP Ping
 surge-ping = "0.8"
 rand = "0.9"
+
+# HTTP Client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Duration parsing and URL validation
+humantime = "2"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crate::storage::StorageError;
-use crate::storage::actor::DbActor;
+use crate::storage::actor::{DEFAULT_BATCH_FLUSH_INTERVAL, DEFAULT_BATCH_SIZE, DbActor};
 use crate::storage::pool::ReadPool;
 use crate::storage::{EventReader, MetricReader, RawSqlReader, StorageAdmin, StorageWriter};
 
@@ -19,8 +19,20 @@ use crate::storage::{EventReader, MetricReader, RawSqlReader, StorageAdmin, Stor
 /// - Approximately 20 seconds of buffering at 500 metrics/sec
 const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 
-/// Default connection pool size for readers.
-const DEFAULT_POOL_SIZE: u32 = 4;
+/// Minimum connection pool size.
+const MIN_POOL_SIZE: u32 = 2;
+
+/// Maximum connection pool size.
+const MAX_POOL_SIZE: u32 = 32;
+
+/// Calculate default pool size based on available CPU parallelism.
+///
+/// Returns the number of available CPUs, clamped between MIN_POOL_SIZE and MAX_POOL_SIZE.
+fn default_pool_size() -> u32 {
+    std::thread::available_parallelism()
+        .map(|p| (p.get() as u32).clamp(MIN_POOL_SIZE, MAX_POOL_SIZE))
+        .unwrap_or(4)
+}
 
 /// Default WAL checkpoint interval.
 const DEFAULT_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -31,16 +43,22 @@ pub struct StorageBuilder {
     pool_size: u32,
     channel_capacity: usize,
     checkpoint_interval: std::time::Duration,
+    batch_size: usize,
+    batch_flush_interval: std::time::Duration,
 }
 
 impl StorageBuilder {
     /// Create a new storage builder.
+    ///
+    /// Pool size defaults to the number of available CPUs (clamped to 2-32).
     pub fn new(db_path: impl AsRef<Path>) -> Self {
         Self {
             db_path: db_path.as_ref().to_path_buf(),
-            pool_size: DEFAULT_POOL_SIZE,
+            pool_size: default_pool_size(),
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
+            batch_size: DEFAULT_BATCH_SIZE,
+            batch_flush_interval: DEFAULT_BATCH_FLUSH_INTERVAL,
         }
     }
 
@@ -59,6 +77,24 @@ impl StorageBuilder {
     /// Set the WAL checkpoint interval.
     pub fn checkpoint_interval(mut self, interval: std::time::Duration) -> Self {
         self.checkpoint_interval = interval;
+        self
+    }
+
+    /// Set the batch size for metric value buffering.
+    ///
+    /// The actor will flush buffered metric values when this threshold is reached.
+    /// Default: 500 items.
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size;
+        self
+    }
+
+    /// Set the batch flush interval for metric value buffering.
+    ///
+    /// The actor will flush buffered metric values after this duration, even if
+    /// the batch size threshold hasn't been reached. Default: 1 second.
+    pub fn batch_flush_interval(mut self, interval: std::time::Duration) -> Self {
+        self.batch_flush_interval = interval;
         self
     }
 
@@ -83,6 +119,8 @@ impl StorageBuilder {
             &self.db_path,
             self.channel_capacity,
             self.checkpoint_interval,
+            self.batch_size,
+            self.batch_flush_interval,
         )?;
 
         // Create reader pool from the cloned connection.
@@ -162,8 +200,14 @@ mod tests {
 
         // Phase 1: Write using actor directly
         {
-            let (handle, tx, _reader_conn) =
-                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+            let (handle, tx, _reader_conn) = DbActor::spawn(
+                &db_path,
+                100,
+                std::time::Duration::from_secs(1),
+                DEFAULT_BATCH_SIZE,
+                DEFAULT_BATCH_FLUSH_INTERVAL,
+            )
+            .unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
@@ -209,8 +253,14 @@ mod tests {
 
         // Phase 1: Write using actor directly
         {
-            let (handle, tx, _reader_conn) =
-                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+            let (handle, tx, _reader_conn) = DbActor::spawn(
+                &db_path,
+                100,
+                std::time::Duration::from_secs(1),
+                DEFAULT_BATCH_SIZE,
+                DEFAULT_BATCH_FLUSH_INTERVAL,
+            )
+            .unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
@@ -245,5 +295,12 @@ mod tests {
         assert_eq!(results.len(), 5);
 
         handles.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_default_pool_size_within_bounds() {
+        let size = super::default_pool_size();
+        assert!(size >= super::MIN_POOL_SIZE);
+        assert!(size <= super::MAX_POOL_SIZE);
     }
 }

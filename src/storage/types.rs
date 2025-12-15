@@ -203,10 +203,6 @@ pub type EventPayload = BTreeMap<String, String>;
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum EventSource {
-    /// Collector registry events.
-    #[strum(serialize = "collector.registry")]
-    #[serde(rename = "collector.registry")]
-    CollectorRegistry,
     /// TCP collector events.
     #[strum(serialize = "collector.network.tcp")]
     #[serde(rename = "collector.network.tcp")]
@@ -225,8 +221,6 @@ pub enum EventSource {
     RuleEngine,
     /// System events.
     System,
-    /// Other events.
-    Other,
 }
 
 /// Event kind classification.

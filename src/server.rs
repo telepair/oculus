@@ -77,15 +77,17 @@ fn parse_sort_order(s: Option<String>) -> Option<SortOrder> {
 /// Parse filtered time range from string.
 /// Supports: 1h, 6h, 12h, 24h, 7d, 30d.
 fn parse_range(range: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeDelta;
+
     let range = range?;
     let now = chrono::Utc::now();
     match range.as_str() {
-        "1h" => Some(now - chrono::Duration::hours(1)),
-        "6h" => Some(now - chrono::Duration::hours(6)),
-        "12h" => Some(now - chrono::Duration::hours(12)),
-        "24h" => Some(now - chrono::Duration::hours(24)),
-        "7d" => Some(now - chrono::Duration::days(7)),
-        "30d" => Some(now - chrono::Duration::days(30)),
+        "1h" => TimeDelta::try_hours(1).map(|d| now - d),
+        "6h" => TimeDelta::try_hours(6).map(|d| now - d),
+        "12h" => TimeDelta::try_hours(12).map(|d| now - d),
+        "24h" => TimeDelta::try_hours(24).map(|d| now - d),
+        "7d" => TimeDelta::try_days(7).map(|d| now - d),
+        "30d" => TimeDelta::try_days(30).map(|d| now - d),
         _ => None,
     }
 }
@@ -217,7 +219,14 @@ async fn metrics_handler(
 
     match state.metric_reader.query(query) {
         Ok(metrics) => HtmlTemplate(MetricsTemplate { metrics }).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to query metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error. Please check server logs.",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -229,7 +238,14 @@ async fn metrics_stats_handler(
     let start = parse_range(params.range);
     match state.metric_reader.stats(start, None) {
         Ok(stats) => Json(stats).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to query metrics stats");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error. Please check server logs.",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -257,7 +273,14 @@ async fn events_handler(
 
     match state.event_reader.query(query) {
         Ok(events) => HtmlTemplate(EventsTemplate { events }).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to query events");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error. Please check server logs.",
+            )
+                .into_response()
+        }
     }
 }
 

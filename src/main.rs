@@ -6,6 +6,7 @@
 use clap::Parser;
 use oculus::{
     collector::CollectorRegistry,
+    collector::http::HttpCollector,
     collector::ping::PingCollector,
     collector::tcp::TcpCollector,
     config::{AppConfig, parse_duration},
@@ -80,11 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!(
-        "Server: {}:{}, Database: {}, Collectors: {}",
+        "Server: {}:{}, Database: {}, Collectors: {} tcp, {} ping, {} http",
         config.server.bind,
         config.server.port,
         config.database.path,
-        config.collectors.len()
+        config.collectors.tcp.len(),
+        config.collectors.ping.len(),
+        config.collectors.http.len(),
     );
 
     // Build storage layer
@@ -113,65 +116,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("Failed to emit service start event: {}", e);
     }
 
-    // Spawn collectors from configuration
-    for collector_config in &config.collectors {
-        match collector_config.collector_type {
-            oculus::MetricCategory::NetworkTcp => {
-                // Use to_tcp_config() for parsing and validation
-                let tcp_config = collector_config.to_tcp_config().map_err(|e| {
-                    format!(
-                        "Failed to parse TCP collector '{}': {}",
-                        collector_config.name, e
-                    )
-                })?;
+    // Spawn TCP collectors
+    for tcp_config in &config.collectors.tcp {
+        let collector_config = tcp_config
+            .to_tcp_config()
+            .map_err(|e| format!("Failed to parse TCP collector '{}': {}", tcp_config.name, e))?;
 
-                // Create and spawn collector
-                let collector = TcpCollector::new(tcp_config, handles.writer.clone());
-                registry.spawn(collector).await.map_err(|e| {
-                    format!(
-                        "Failed to spawn collector '{}': {}",
-                        collector_config.name, e
-                    )
-                })?;
+        let collector = TcpCollector::new(collector_config, handles.writer.clone());
+        registry
+            .spawn(collector)
+            .await
+            .map_err(|e| format!("Failed to spawn collector '{}': {}", tcp_config.name, e))?;
 
-                tracing::info!(
-                    "Spawned collector: {} (tcp, target={})",
-                    collector_config.name,
-                    collector_config.target,
-                );
-            }
-            oculus::MetricCategory::NetworkPing => {
-                // Use to_ping_config() for parsing and validation
-                let ping_config = collector_config.to_ping_config().map_err(|e| {
-                    format!(
-                        "Failed to parse Ping collector '{}': {}",
-                        collector_config.name, e
-                    )
-                })?;
+        tracing::info!(
+            "Spawned collector: {} (tcp, host={}:{})",
+            tcp_config.name,
+            tcp_config.host,
+            tcp_config.port,
+        );
+    }
 
-                // Create and spawn collector
-                let collector = PingCollector::new(ping_config, handles.writer.clone());
-                registry.spawn(collector).await.map_err(|e| {
-                    format!(
-                        "Failed to spawn collector '{}': {}",
-                        collector_config.name, e
-                    )
-                })?;
+    // Spawn ping collectors
+    for ping_config in &config.collectors.ping {
+        let collector_config = ping_config.to_ping_config().map_err(|e| {
+            format!(
+                "Failed to parse Ping collector '{}': {}",
+                ping_config.name, e
+            )
+        })?;
 
-                tracing::info!(
-                    "Spawned collector: {} (ping, target={})",
-                    collector_config.name,
-                    collector_config.target,
-                );
-            }
-            other => {
-                tracing::warn!(
-                    "Unsupported collector type '{:?}' for collector '{}', skipping",
-                    other,
-                    collector_config.name
-                );
-            }
-        }
+        let collector = PingCollector::new(collector_config, handles.writer.clone());
+        registry
+            .spawn(collector)
+            .await
+            .map_err(|e| format!("Failed to spawn collector '{}': {}", ping_config.name, e))?;
+
+        tracing::info!(
+            "Spawned collector: {} (ping, host={})",
+            ping_config.name,
+            ping_config.host,
+        );
+    }
+
+    // Spawn HTTP collectors
+    for http_config in &config.collectors.http {
+        let collector_config = http_config.to_http_config().map_err(|e| {
+            format!(
+                "Failed to parse HTTP collector '{}': {}",
+                http_config.name, e
+            )
+        })?;
+
+        let collector = HttpCollector::new(collector_config, handles.writer.clone());
+        registry
+            .spawn(collector)
+            .await
+            .map_err(|e| format!("Failed to spawn collector '{}': {}", http_config.name, e))?;
+
+        tracing::info!(
+            "Spawned collector: {} (http, url={})",
+            http_config.name,
+            http_config.url,
+        );
     }
 
     // Create web server state

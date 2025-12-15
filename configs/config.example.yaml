@@ -6,45 +6,57 @@ database:
   path: data/oculus.db
   pool_size: 4
   channel_capacity: 10000
-  checkpoint_interval: 5s # Optimized for stability, 1s caused bus errors
+  checkpoint_interval: 5s
 
 collectors:
-  # Probing Google DNS (8.8.8.8:53)
-  - type: network.tcp
-    name: google-dns
-    target: 8.8.8.8:53
-    interval: 5s
-    timeout: 5s
-    tags:
-      env: production
-      service: external
+  tcp:
+    # Probing Google DNS (8.8.8.8:53)
+    - name: google-dns
+      host: 8.8.8.8
+      port: 53
+      interval: 5s
+      timeout: 5s
+      tags:
+        env: production
+        service: external
 
-  # Failing probe (localhost:9999)
-  - type: network.tcp
-    name: localhost-fail
-    target: 127.0.0.1:9999
-    interval: 5s
-    timeout: 1s
-    tags:
-      env: local
-      service: test
+    # Failing probe (localhost:9999)
+    - name: localhost-fail
+      host: 127.0.0.1
+      port: 9999
+      interval: 5s
+      timeout: 1s
+      tags:
+        env: local
+        service: test
 
-  # ICMP ping probe (Google DNS)
-  - type: network.ping
-    name: google-dns-ping
-    target: 8.8.8.8
-    interval: 30s
-    timeout: 3s
-    tags:
-      env: production
-      service: external
+  ping:
+    # ICMP ping probe (Google DNS)
+    - name: google-dns-ping
+      host: 8.8.8.8
+      interval: 30s
+      timeout: 3s
+      tags:
+        env: production
+        service: external
 
-  # ICMP ping probe (Cloudflare DNS)
-  - type: network.ping
-    name: cloudflare-dns-ping
-    target: 1.1.1.1
-    interval: 30s
-    timeout: 3s
-    tags:
-      env: production
-      service: external
+    # ICMP ping probe (Cloudflare DNS)
+    - name: cloudflare-dns-ping
+      host: 1.1.1.1
+      interval: 30s
+      timeout: 3s
+      tags:
+        env: production
+        service: external
+
+  http:
+    # HTTP probe (Google)
+    - name: google-health
+      url: https://www.google.com
+      method: GET
+      expected_status: 200
+      interval: 30s
+      timeout: 10s
+      tags:
+        env: production
+        service: external

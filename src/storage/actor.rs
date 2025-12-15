@@ -19,11 +19,11 @@ use crate::storage::types::{Event, MetricSeries, MetricValue};
 // Constants
 // =============================================================================
 
-/// Maximum items in buffer before flush.
-const BATCH_SIZE_THRESHOLD: usize = 500;
+/// Default maximum items in buffer before flush.
+pub const DEFAULT_BATCH_SIZE: usize = 500;
 
-/// Maximum time before buffer flush.
-const BATCH_TIME_THRESHOLD: Duration = Duration::from_secs(1);
+/// Default maximum time before buffer flush.
+pub const DEFAULT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 // =============================================================================
 // Commands
@@ -58,13 +58,17 @@ pub enum Command {
 struct BatchBuffer<T> {
     items: Vec<T>,
     last_flush: Instant,
+    size_threshold: usize,
+    time_threshold: Duration,
 }
 
 impl<T> BatchBuffer<T> {
-    fn new() -> Self {
+    fn new(size_threshold: usize, time_threshold: Duration) -> Self {
         Self {
-            items: Vec::with_capacity(BATCH_SIZE_THRESHOLD),
+            items: Vec::with_capacity(size_threshold),
             last_flush: Instant::now(),
+            size_threshold,
+            time_threshold,
         }
     }
 
@@ -77,8 +81,12 @@ impl<T> BatchBuffer<T> {
     }
 
     fn should_flush(&self) -> bool {
-        self.items.len() >= BATCH_SIZE_THRESHOLD
-            || (!self.items.is_empty() && self.last_flush.elapsed() >= BATCH_TIME_THRESHOLD)
+        self.items.len() >= self.size_threshold
+            || (!self.items.is_empty() && self.last_flush.elapsed() >= self.time_threshold)
+    }
+
+    fn time_threshold(&self) -> Duration {
+        self.time_threshold
     }
 
     fn take(&mut self) -> Vec<T> {
@@ -114,10 +122,19 @@ impl DbActor {
     /// - `JoinHandle<()>`: Handle to the actor thread
     /// - `SyncSender<Command>`: Channel sender for commands
     /// - `Connection`: A cloneable connection for creating reader connections via `try_clone()`
+    ///
+    /// # Parameters
+    /// - `db_path`: Path to the DuckDB database file
+    /// - `channel_capacity`: Maximum number of commands queued before blocking
+    /// - `checkpoint_interval`: Time between WAL checkpoints
+    /// - `batch_size`: Maximum items in buffer before flush (default: 500)
+    /// - `batch_flush_interval`: Maximum time before buffer flush (default: 1s)
     pub fn spawn(
         db_path: &Path,
         channel_capacity: usize,
         checkpoint_interval: Duration,
+        batch_size: usize,
+        batch_flush_interval: Duration,
     ) -> Result<(JoinHandle<()>, SyncSender<Command>, Connection), StorageError> {
         let (tx, rx) = mpsc::sync_channel(channel_capacity);
         let conn = Connection::open(db_path)?;
@@ -131,7 +148,7 @@ impl DbActor {
         let mut actor = DbActor {
             conn,
             rx,
-            value_buffer: BatchBuffer::new(),
+            value_buffer: BatchBuffer::new(batch_size, batch_flush_interval),
             last_checkpoint: Instant::now(),
             checkpoint_interval,
         };
@@ -146,7 +163,7 @@ impl DbActor {
         loop {
             let now = Instant::now();
             let flush_deadline = if !self.value_buffer.is_empty() {
-                self.value_buffer.last_flush + BATCH_TIME_THRESHOLD
+                self.value_buffer.last_flush + self.value_buffer.time_threshold()
             } else {
                 now + Duration::from_secs(60)
             };
@@ -257,7 +274,10 @@ impl DbActor {
              ON CONFLICT (series_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, description = EXCLUDED.description",
         )?;
 
-        let tags_json = serde_json::to_string(&s.static_tags).unwrap_or_else(|_| "{}".to_string());
+        let tags_json = serde_json::to_string(&s.static_tags).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, series_id = s.series_id, "Failed to serialize static_tags, using empty object");
+            "{}".to_string()
+        });
         stmt.execute(duckdb::params![
             s.series_id,
             s.category.as_ref(),
@@ -283,8 +303,10 @@ impl DbActor {
             let mut appender = tx.appender("metric_values")?;
 
             for v in values {
-                let tags_json =
-                    serde_json::to_string(&v.dynamic_tags).unwrap_or_else(|_| "{}".to_string());
+                let tags_json = serde_json::to_string(&v.dynamic_tags).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, series_id = v.series_id, "Failed to serialize dynamic_tags, using empty object");
+                    "{}".to_string()
+                });
                 appender.append_row(duckdb::params![
                     v.ts.timestamp_micros(),
                     v.series_id,
@@ -310,7 +332,10 @@ impl DbActor {
              VALUES (?, ?, ?, ?, ?, ?)",
         )?;
 
-        let payload_json = serde_json::to_string(&e.payload).unwrap_or_else(|_| "{}".to_string());
+        let payload_json = serde_json::to_string(&e.payload).unwrap_or_else(|err| {
+            tracing::warn!(error = %err, message = %e.message, "Failed to serialize event payload, using empty object");
+            "{}".to_string()
+        });
         stmt.execute(duckdb::params![
             e.ts.timestamp_micros(),
             e.source.as_ref(),
@@ -328,7 +353,9 @@ impl DbActor {
     // =========================================================================
 
     fn cleanup_metric_values(&self, retention_days: u32) -> Result<(), StorageError> {
-        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+        let cutoff = chrono::TimeDelta::try_days(i64::from(retention_days))
+            .map(|d| Utc::now() - d)
+            .unwrap_or_else(Utc::now);
         let deleted = self.conn.execute(
             "DELETE FROM metric_values WHERE ts < ?",
             [cutoff.timestamp_micros()],
@@ -338,7 +365,9 @@ impl DbActor {
     }
 
     fn cleanup_events(&self, retention_days: u32) -> Result<(), StorageError> {
-        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+        let cutoff = chrono::TimeDelta::try_days(i64::from(retention_days))
+            .map(|d| Utc::now() - d)
+            .unwrap_or_else(Utc::now);
         let deleted = self.conn.execute(
             "DELETE FROM events WHERE ts < ?",
             [cutoff.timestamp_micros()],
@@ -363,8 +392,14 @@ mod tests {
     #[test]
     fn test_actor_lifecycle() {
         let dir = tempdir().unwrap();
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&dir.path().join("test.db"), 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &dir.path().join("test.db"),
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
         tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
     }
@@ -373,8 +408,14 @@ mod tests {
     fn test_insert_metric_with_flush() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("metric.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
         let series = MetricSeries::new(
             MetricCategory::NetworkTcp,
@@ -403,8 +444,14 @@ mod tests {
     fn test_series_deduplication() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("dedup.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
         let series1 = MetricSeries::new(
             MetricCategory::Custom,
@@ -460,8 +507,14 @@ mod tests {
     fn test_insert_event_with_flush() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("event.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
         let event = Event::new(
             EventSource::System,
@@ -488,11 +541,17 @@ mod tests {
     fn test_batch_threshold() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("batch.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 1000, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            1000,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
-        // Insert exactly BATCH_SIZE_THRESHOLD items
-        for i in 0..BATCH_SIZE_THRESHOLD {
+        // Insert exactly DEFAULT_BATCH_SIZE items
+        for i in 0..DEFAULT_BATCH_SIZE {
             let series = MetricSeries::new(
                 MetricCategory::Custom,
                 "batch",
@@ -515,15 +574,21 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM metric_values", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, BATCH_SIZE_THRESHOLD as i64);
+        assert_eq!(count, DEFAULT_BATCH_SIZE as i64);
     }
 
     #[test]
     fn test_time_based_flush() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("time_flush.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
         // Insert fewer items than BATCH_SIZE_THRESHOLD
         let series = MetricSeries::new(
@@ -558,8 +623,14 @@ mod tests {
     fn test_cleanup_operations() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("cleanup.db");
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            Duration::from_secs(1),
+            DEFAULT_BATCH_SIZE,
+            DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
 
         // Insert test data
         let series = MetricSeries::new(

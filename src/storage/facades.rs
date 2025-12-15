@@ -310,8 +310,7 @@ impl MetricReader {
         }
 
         // Aggregate into CategoryStats
-        let mut category_map: std::collections::HashMap<String, CategoryStats> =
-            std::collections::HashMap::new();
+        let mut category_map: HashMap<String, CategoryStats> = HashMap::new();
         let mut total = 0u64;
         let mut success_count = 0u64;
         let mut failure_count = 0u64;
@@ -409,7 +408,7 @@ impl EventReader {
                 id: row.get(0)?,
                 ts: DateTime::from_timestamp_micros(row.get(1)?).unwrap_or(DateTime::UNIX_EPOCH),
                 source: EventSource::from_str(&row.get::<_, String>(2)?)
-                    .unwrap_or(EventSource::Other),
+                    .unwrap_or(EventSource::System),
                 kind: EventKind::from_str(&row.get::<_, String>(3)?).unwrap_or(EventKind::System),
                 severity: EventSeverity::from_str(&row.get::<_, String>(4)?)
                     .unwrap_or(EventSeverity::Info),
@@ -435,12 +434,79 @@ impl std::fmt::Debug for RawSqlReader {
     }
 }
 
+/// Forbidden SQL keywords that could modify data or schema.
+const FORBIDDEN_SQL_KEYWORDS: &[&str] = &[
+    "delete",
+    "update",
+    "insert",
+    "drop",
+    "alter",
+    "create",
+    "truncate",
+    "replace",
+    "merge",
+    "grant",
+    "revoke",
+    "commit",
+    "rollback",
+    "savepoint",
+    "lock",
+    "unlock",
+    "call",
+    "execute",
+    "exec",
+    "attach",
+    "detach",
+    "vacuum",
+    "analyze",
+    "pragma",
+    "copy",
+    "load",
+    "export",
+];
+
+/// Validate SQL query for safety.
+fn validate_sql_safety(sql: &str) -> Result<(), StorageError> {
+    static SQL_VALIDATOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+    let validator = SQL_VALIDATOR.get_or_init(|| {
+        let pattern = FORBIDDEN_SQL_KEYWORDS.join("|");
+        // Case-insensitive, word boundaries around the set of keywords
+        regex::Regex::new(&format!(r"(?i)\b({})\b", pattern))
+            .expect("failed to compile SQL validation regex")
+    });
+
+    if validator.is_match(sql) {
+        return Err(StorageError::InvalidData(
+            "forbidden SQL keyword found".to_string(),
+        ));
+    }
+
+    // Check for SQL comments that could hide malicious code
+    // We check this separately as the regex above handles keywords
+    if sql.contains("--") || sql.contains("/*") {
+        return Err(StorageError::InvalidData(
+            "SQL comments not allowed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 impl RawSqlReader {
     pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
         Self { pool }
     }
 
     /// Execute raw SELECT query.
+    ///
+    /// # Security
+    ///
+    /// This method performs strict validation to prevent SQL injection:
+    /// - Only SELECT statements are allowed
+    /// - Multiple statements are rejected
+    /// - Dangerous keywords (DELETE, UPDATE, DROP, etc.) are blocked
+    /// - SQL comments are not allowed
     pub fn execute(&self, sql: &str) -> Result<Vec<HashMap<String, Value>>, StorageError> {
         let trimmed = sql.trim().trim_end_matches(';');
         if !trimmed.to_ascii_lowercase().starts_with("select") {
@@ -451,6 +517,9 @@ impl RawSqlReader {
                 "multiple statements not allowed".to_string(),
             ));
         }
+
+        // Additional security validation
+        validate_sql_safety(trimmed)?;
 
         let conn = self.pool.get()?;
         let describe = format!("DESCRIBE SELECT * FROM ({trimmed}) AS _q");
@@ -566,8 +635,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            std::time::Duration::from_secs(1),
+            crate::storage::actor::DEFAULT_BATCH_SIZE,
+            crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
         let writer = StorageWriter::new(tx.clone());
         let admin = StorageAdmin::new(tx);
 
@@ -603,8 +678,14 @@ mod tests {
         let db_path = dir.path().join("event.db");
 
         {
-            let (handle, tx, _reader_conn) =
-                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+            let (handle, tx, _reader_conn) = DbActor::spawn(
+                &db_path,
+                100,
+                std::time::Duration::from_secs(1),
+                crate::storage::actor::DEFAULT_BATCH_SIZE,
+                crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+            )
+            .unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
@@ -639,8 +720,14 @@ mod tests {
         let db_path = dir.path().join("filter.db");
 
         {
-            let (handle, tx, _reader_conn) =
-                DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+            let (handle, tx, _reader_conn) = DbActor::spawn(
+                &db_path,
+                100,
+                std::time::Duration::from_secs(1),
+                crate::storage::actor::DEFAULT_BATCH_SIZE,
+                crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+            )
+            .unwrap();
             let writer = StorageWriter::new(tx.clone());
             let admin = StorageAdmin::new(tx);
 
@@ -701,8 +788,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("dropped.db");
 
-        let (handle, tx, _reader_conn) =
-            DbActor::spawn(&db_path, 100, std::time::Duration::from_secs(1)).unwrap();
+        let (handle, tx, _reader_conn) = DbActor::spawn(
+            &db_path,
+            100,
+            std::time::Duration::from_secs(1),
+            crate::storage::actor::DEFAULT_BATCH_SIZE,
+            crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .unwrap();
         let writer = StorageWriter::new(tx.clone());
         let writer_clone = writer.clone();
 
@@ -727,5 +820,34 @@ mod tests {
 
         tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_validate_sql_safety_allows_select() {
+        assert!(super::validate_sql_safety("SELECT * FROM metrics").is_ok());
+        assert!(super::validate_sql_safety("select name, value from metrics where id = 1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_safety_blocks_forbidden_keywords() {
+        assert!(super::validate_sql_safety("DELETE FROM metrics").is_err());
+        assert!(super::validate_sql_safety("select * from metrics; drop table metrics").is_err());
+        assert!(super::validate_sql_safety("UPDATE metrics SET value = 0").is_err());
+        assert!(super::validate_sql_safety("INSERT INTO metrics VALUES (1)").is_err());
+        assert!(super::validate_sql_safety("SELECT * FROM metrics WHERE truncate = 1").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_safety_blocks_comments() {
+        assert!(super::validate_sql_safety("SELECT * FROM metrics -- comment").is_err());
+        assert!(super::validate_sql_safety("SELECT /* hidden */ * FROM metrics").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_safety_keyword_word_boundary() {
+        // "updated_at" contains "update" but should be allowed (not a standalone keyword)
+        assert!(super::validate_sql_safety("SELECT updated_at FROM metrics").is_ok());
+        // "executor" contains "exec" but should be allowed
+        assert!(super::validate_sql_safety("SELECT executor FROM jobs").is_ok());
     }
 }

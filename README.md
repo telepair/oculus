@@ -8,8 +8,8 @@ Value Monitoring • Single Binary • Zero Dependencies
 
 Oculus is an out-of-the-box value monitoring software designed for individuals and small teams. Written in Rust, single binary, zero external dependencies.
 
-> - ⚠️ **Status**: v0.1.0 (Genesis / MVP) - Under active development
-> - 🛑 **Scope Note**: v0.1.0 is single-user; no user/account/role management.
+> - ⚠️ **Status**: v0.1.1 - Under active development
+> - 🛑 **Scope Note**: v0.1.x is single-user; no user/account/role management.
 
 ## Features
 
@@ -226,15 +226,17 @@ cargo run --bin oculus
 
 ## TODO
 
-> v0.1.0 MVP milestone tasks based on [PRD](docs/PRD.md)
+> v0.1.1 milestone tasks based on [PRD](docs/PRD.md)
 
 ### Collector Layer
 
-- [ ] Core collector trait and MPSC channel pipeline
+- [x] Core collector trait and MPSC channel pipeline
 - [ ] Crypto Market: Asset price (BTC, ETH), Fear & Greed Index, MVRV
 - [ ] Stock Market: Stock price, index data (SPY, QQQ)
 - [ ] Prediction Market: Polymarket integration
-- [ ] Network Probe: HTTP RTT and status code checks
+- [x] Network Probe: TCP port probe
+- [x] Network Probe: ICMP ping probe
+- [x] Network Probe: HTTP RTT and status code checks
 - [ ] Generic API Collector: RESTful API with JSON path extraction
 
 ### Storage Layer
@@ -242,7 +244,7 @@ cargo run --bin oculus
 - [x] DuckDB integration with single-writer actor model
 - [x] `metrics` table schema and migrations
 - [x] `events` table for alerts/audit
-- [x] Data retention and cleanup policy (7-day window)
+- [x] Data retention and cleanup policy (configurable window)
 
 ### Rule Engine
 
@@ -253,15 +255,17 @@ cargo run --bin oculus
 
 ### Presentation Layer
 
-- [ ] Axum web server setup
-- [ ] HTMX dashboard homepage (`GET /`)
-- [ ] Real-time metrics partial (`GET /partials/metrics`)
-- [ ] REST API endpoints (`/api/metrics`, `/api/query`, etc.)
-- [ ] Askama templates with Tailwind CSS (bundled)
+- [x] Axum web server setup
+- [x] HTMX dashboard homepage (`GET /`)
+- [x] Real-time metrics partial (`GET /api/metrics`)
+- [x] Real-time events partial (`GET /api/events`)
+- [x] Metrics stats endpoint (`GET /api/metrics/stats`)
+- [ ] Raw SQL query endpoint (`POST /api/query`)
+- [x] Askama templates with Tailwind CSS (bundled)
 
 ### Notification Layer
 
-- [ ] Log output via `tracing` crate
+- [x] Log output via `tracing` crate
 - [ ] Email notifications (SMTP)
 - [ ] Telegram bot integration
 - [ ] Discord webhook support
@@ -274,9 +278,9 @@ cargo run --bin oculus
 
 ### Infrastructure
 
-- [ ] Configuration file parsing (YAML)
-- [ ] CLI argument handling
-- [ ] Health probes (`/healthz`, `/readyz`)
+- [x] Configuration file parsing (YAML)
+- [x] CLI argument handling
+- [x] Health probes (`/healthz`, `/readyz`)
 - [ ] Performance validation (startup < 100ms, memory < 50MB)
 
 ## Contributing

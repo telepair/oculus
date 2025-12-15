@@ -6,15 +6,32 @@
 //! - Collector definitions (type, name, target, schedule, timeout)
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::collector::http::{HttpConfig, HttpMethod};
 use crate::collector::ping::PingConfig;
 use crate::collector::tcp::TcpConfig;
 use crate::collector::traits::validate_ip_address;
-use crate::storage::{MetricCategory, StaticTags};
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Default collection interval (30 seconds).
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default connection pool size.
+pub const DEFAULT_POOL_SIZE: u32 = 4;
+
+/// Default channel capacity.
+pub const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Default checkpoint interval (5 seconds).
+pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration error types.
 #[derive(Debug, Error)]
@@ -41,29 +58,29 @@ pub struct AppConfig {
     /// Database configuration.
     pub database: DatabaseConfig,
 
-    /// Collector configurations.
+    /// Collector configurations grouped by type.
     #[serde(default)]
-    pub collectors: Vec<CollectorConfigEntry>,
+    pub collectors: CollectorsConfig,
 }
 
 /// Web server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServerConfig {
     /// Server bind address (default: "0.0.0.0").
-    #[serde(default = "default_bind_address")]
     pub bind: String,
 
     /// Server port (default: 8080).
-    #[serde(default = "default_port")]
     pub port: u16,
 }
 
-fn default_bind_address() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_port() -> u16 {
-    8080
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0".to_string(),
+            port: 8080,
+        }
+    }
 }
 
 /// Database configuration.
@@ -76,7 +93,7 @@ pub struct DatabaseConfig {
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
-    /// MPSC channel capacity for write operations (default: 1000).
+    /// MPSC channel capacity for write operations (default: 10000).
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
 
@@ -85,154 +102,228 @@ pub struct DatabaseConfig {
     pub checkpoint_interval: String,
 }
 
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: "oculus.db".to_string(),
+            pool_size: DEFAULT_POOL_SIZE,
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            checkpoint_interval: "5s".to_string(),
+        }
+    }
+}
+
 fn default_pool_size() -> u32 {
-    4
+    DEFAULT_POOL_SIZE
 }
 
 fn default_channel_capacity() -> usize {
-    10_000
+    DEFAULT_CHANNEL_CAPACITY
 }
 
 fn default_checkpoint_interval() -> String {
     "5s".to_string()
 }
 
-/// Collector configuration entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CollectorConfigEntry {
-    /// Collector type - maps to MetricCategory (e.g., "network.tcp", "network.ping").
-    #[serde(rename = "type")]
-    pub collector_type: MetricCategory,
+fn default_http_method() -> String {
+    "GET".to_string()
+}
 
+fn default_expected_status() -> u16 {
+    200
+}
+
+// =============================================================================
+// Collector Configurations
+// =============================================================================
+
+/// Collectors configuration grouped by type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CollectorsConfig {
+    /// TCP port probe collectors.
+    #[serde(default)]
+    pub tcp: Vec<TcpCollectorConfig>,
+
+    /// ICMP ping probe collectors.
+    #[serde(default)]
+    pub ping: Vec<PingCollectorConfig>,
+
+    /// HTTP endpoint probe collectors.
+    #[serde(default)]
+    pub http: Vec<HttpCollectorConfig>,
+}
+
+/// TCP collector configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpCollectorConfig {
     /// Unique collector name.
     pub name: String,
 
-    /// Target endpoint (e.g., "127.0.0.1:6379" for TCP, "8.8.8.8" for ping).
-    pub target: String,
+    /// Target host (IP address).
+    pub host: String,
 
-    /// Collection interval (e.g., "30s", "1m", "5m"). Mutually exclusive with `cron`.
+    /// Target port.
+    pub port: u16,
+
+    /// Collection interval (e.g., "30s", "1m").
     #[serde(default)]
     pub interval: Option<String>,
 
-    /// Cron expression for scheduled execution (6-field: sec min hour day month weekday).
-    /// Mutually exclusive with `interval`.
-    #[serde(default)]
-    pub cron: Option<String>,
-
-    /// Timeout for each probe (e.g., "5s").
+    /// Probe timeout (e.g., "5s").
     pub timeout: String,
 
-    /// Static tags for this collector (key-value pairs).
+    /// Static tags for this collector.
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
+
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-impl CollectorConfigEntry {
+impl TcpCollectorConfig {
     /// Convert to TcpConfig.
-    ///
-    /// # Errors
-    /// Returns `ConfigError` if the target format is invalid (expected "host:port").
     pub fn to_tcp_config(&self) -> Result<TcpConfig, ConfigError> {
-        // Parse target as "host:port"
-        let (host, port) = self.parse_host_port()?;
-
         // Validate host is a valid IP address
-        validate_ip_address(&host).map_err(|e| {
-            ConfigError::ValidationError(format!("collector '{}': {}", self.name, e))
+        validate_ip_address(&self.host).map_err(|e| {
+            ConfigError::ValidationError(format!("tcp collector '{}': {}", self.name, e))
         })?;
 
-        let timeout = self.parse_timeout()?;
-        let interval = self.parse_interval()?;
+        let (timeout, interval) = parse_collector_timing(
+            &self.timeout,
+            &self.interval,
+            &format!("tcp collector '{}'", self.name),
+        )?;
 
-        let mut config = TcpConfig::new(&self.name, host, port)
+        let mut config = TcpConfig::new(&self.name, &self.host, self.port)
             .with_timeout(timeout)
             .with_interval(interval)
-            .with_static_tags(self.to_static_tags());
+            .with_static_tags(self.tags.clone());
 
-        if let Some(desc) = self.tags.get("description") {
+        if let Some(desc) = &self.description {
             config = config.with_description(desc);
         }
 
         Ok(config)
     }
+}
 
+/// Ping collector configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingCollectorConfig {
+    /// Unique collector name.
+    pub name: String,
+
+    /// Target host (IP address or hostname).
+    pub host: String,
+
+    /// Collection interval (e.g., "30s", "1m").
+    #[serde(default)]
+    pub interval: Option<String>,
+
+    /// Probe timeout (e.g., "3s").
+    pub timeout: String,
+
+    /// Static tags for this collector.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl PingCollectorConfig {
     /// Convert to PingConfig.
-    ///
-    /// Note: The target can be either an IP address or a hostname.
-    /// DNS resolution is handled at collect time by the PingCollector.
-    ///
-    /// # Errors
-    /// Returns `ConfigError` if the timeout or interval format is invalid.
     pub fn to_ping_config(&self) -> Result<PingConfig, ConfigError> {
-        // Note: We don't validate IP here since PingCollector supports hostname resolution
-        let timeout = self.parse_timeout()?;
-        let interval = self.parse_interval()?;
+        let (timeout, interval) = parse_collector_timing(
+            &self.timeout,
+            &self.interval,
+            &format!("ping collector '{}'", self.name),
+        )?;
 
-        let mut config = PingConfig::new(&self.name, &self.target)
+        let mut config = PingConfig::new(&self.name, &self.host)
             .with_timeout(timeout)
             .with_interval(interval)
-            .with_static_tags(self.to_static_tags());
+            .with_static_tags(self.tags.clone());
 
-        if let Some(desc) = self.tags.get("description") {
+        if let Some(desc) = &self.description {
             config = config.with_description(desc);
         }
 
         Ok(config)
     }
+}
 
-    /// Parse target as "host:port".
-    fn parse_host_port(&self) -> Result<(String, u16), ConfigError> {
-        let parts: Vec<&str> = self.target.rsplitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(ConfigError::ValidationError(format!(
-                "collector '{}': target must be in 'host:port' format, got '{}'",
-                self.name, self.target
-            )));
-        }
+/// HTTP collector configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpCollectorConfig {
+    /// Unique collector name.
+    pub name: String,
 
-        let port: u16 = parts[0].parse().map_err(|_| {
+    /// Target URL (HTTP or HTTPS).
+    pub url: String,
+
+    /// HTTP method (GET, POST, HEAD, etc.).
+    #[serde(default = "default_http_method")]
+    pub method: String,
+
+    /// Expected HTTP status code (default: 200).
+    #[serde(default = "default_expected_status")]
+    pub expected_status: u16,
+
+    /// Collection interval (e.g., "30s", "1m").
+    #[serde(default)]
+    pub interval: Option<String>,
+
+    /// Request timeout (e.g., "10s").
+    pub timeout: String,
+
+    /// Static tags for this collector.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl HttpCollectorConfig {
+    /// Convert to HttpConfig.
+    pub fn to_http_config(&self) -> Result<HttpConfig, ConfigError> {
+        // Validate URL format
+        url::Url::parse(&self.url).map_err(|e| {
             ConfigError::ValidationError(format!(
-                "collector '{}': invalid port '{}'",
-                self.name, parts[0]
+                "http collector '{}': invalid URL '{}': {}",
+                self.name, self.url, e
             ))
         })?;
 
-        let host = parts[1].to_string();
-        Ok((host, port))
-    }
+        let (timeout, interval) = parse_collector_timing(
+            &self.timeout,
+            &self.interval,
+            &format!("http collector '{}'", self.name),
+        )?;
 
-    /// Parse interval or return default.
-    fn parse_interval(&self) -> Result<Duration, ConfigError> {
-        match &self.interval {
-            Some(interval) => parse_duration(interval).map_err(|e| {
-                ConfigError::ValidationError(format!(
-                    "collector '{}': invalid interval: {}",
-                    self.name, e
-                ))
-            }),
-            None => Ok(Duration::from_secs(30)), // Default interval
-        }
-    }
-
-    /// Parse timeout.
-    fn parse_timeout(&self) -> Result<Duration, ConfigError> {
-        parse_duration(&self.timeout).map_err(|e| {
+        let method: HttpMethod = self.method.parse().map_err(|()| {
             ConfigError::ValidationError(format!(
-                "collector '{}': invalid timeout: {}",
-                self.name, e
+                "http collector '{}': invalid method '{}', expected GET/POST/HEAD/PUT/DELETE/OPTIONS/PATCH",
+                self.name, self.method
             ))
-        })
-    }
+        })?;
 
-    /// Convert tags to StaticTags.
-    fn to_static_tags(&self) -> StaticTags {
-        let mut static_tags = StaticTags::new();
-        for (k, v) in &self.tags {
-            if k != "description" {
-                static_tags.insert(k.clone(), v.clone());
-            }
+        let mut config = HttpConfig::new(&self.name, &self.url)
+            .with_method(method)
+            .with_expected_status(self.expected_status)
+            .with_timeout(timeout)
+            .with_interval(interval)
+            .with_static_tags(self.tags.clone());
+
+        if let Some(desc) = &self.description {
+            config = config.with_description(desc);
         }
-        static_tags
+
+        Ok(config)
     }
 }
 
@@ -253,6 +344,14 @@ impl AppConfig {
     /// # Errors
     /// Returns `ConfigError::ValidationError` if any field is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // Validate server bind address
+        self.server.bind.parse::<IpAddr>().map_err(|_| {
+            ConfigError::ValidationError(format!(
+                "invalid server bind address: '{}'",
+                self.server.bind
+            ))
+        })?;
+
         // Validate server port
         if self.server.port == 0 {
             return Err(ConfigError::ValidationError(
@@ -279,71 +378,65 @@ impl AppConfig {
             ConfigError::ValidationError(format!("database checkpoint_interval: {}", e))
         })?;
 
-        // Validate collectors
-        for collector in &self.collectors {
-            if collector.name.is_empty() {
+        // Check for duplicate collector names across all types
+        let mut seen_names = HashSet::new();
+
+        // Validate TCP collectors
+        for tcp in &self.collectors.tcp {
+            if tcp.name.is_empty() {
                 return Err(ConfigError::ValidationError(
-                    "collector name cannot be empty".to_string(),
+                    "tcp collector name cannot be empty".to_string(),
                 ));
             }
-
-            if collector.target.is_empty() {
+            if !seen_names.insert(&tcp.name) {
                 return Err(ConfigError::ValidationError(format!(
-                    "collector '{}': target cannot be empty",
-                    collector.name
+                    "duplicate collector name: '{}'",
+                    tcp.name
                 )));
             }
+            // Validate by attempting conversion (validates host, timeout, interval)
+            tcp.to_tcp_config()?;
+        }
 
-            // Validate schedule: either interval or cron must be set (not both)
-            match (&collector.interval, &collector.cron) {
-                (Some(interval), None) => {
-                    parse_duration(interval).map_err(|e| {
-                        ConfigError::ValidationError(format!(
-                            "collector '{}': invalid interval format: {}",
-                            collector.name, e
-                        ))
-                    })?;
-                }
-                (None, Some(cron_expr)) => {
-                    // Validate cron expression
-                    use std::str::FromStr;
-                    cron::Schedule::from_str(cron_expr).map_err(|e| {
-                        ConfigError::ValidationError(format!(
-                            "collector '{}': invalid cron expression: {}",
-                            collector.name, e
-                        ))
-                    })?;
-                }
-                (Some(_), Some(_)) => {
-                    return Err(ConfigError::ValidationError(format!(
-                        "collector '{}': cannot specify both 'interval' and 'cron'",
-                        collector.name
-                    )));
-                }
-                (None, None) => {
-                    return Err(ConfigError::ValidationError(format!(
-                        "collector '{}': must specify either 'interval' or 'cron'",
-                        collector.name
-                    )));
-                }
+        // Validate ping collectors
+        for ping in &self.collectors.ping {
+            if ping.name.is_empty() {
+                return Err(ConfigError::ValidationError(
+                    "ping collector name cannot be empty".to_string(),
+                ));
             }
+            if !seen_names.insert(&ping.name) {
+                return Err(ConfigError::ValidationError(format!(
+                    "duplicate collector name: '{}'",
+                    ping.name
+                )));
+            }
+            ping.to_ping_config()?;
+        }
 
-            // Validate timeout format
-            parse_duration(&collector.timeout).map_err(|e| {
-                ConfigError::ValidationError(format!(
-                    "collector '{}': invalid timeout format: {}",
-                    collector.name, e
-                ))
-            })?;
+        // Validate HTTP collectors
+        for http in &self.collectors.http {
+            if http.name.is_empty() {
+                return Err(ConfigError::ValidationError(
+                    "http collector name cannot be empty".to_string(),
+                ));
+            }
+            if !seen_names.insert(&http.name) {
+                return Err(ConfigError::ValidationError(format!(
+                    "duplicate collector name: '{}'",
+                    http.name
+                )));
+            }
+            http.to_http_config()?;
         }
 
         Ok(())
     }
 }
 
-/// Parse duration string (e.g., "30s", "1m", "5m").
+/// Parse duration string using humantime.
 ///
-/// Supports units: `s` (seconds), `m` (minutes), `h` (hours).
+/// Supports various formats: `30s`, `1m`, `5m30s`, `1h`, `2h30m`, `1d`, `100ms`, etc.
 ///
 /// # Examples
 ///
@@ -353,24 +446,36 @@ impl AppConfig {
 /// assert_eq!(parse_duration("30s").unwrap().as_secs(), 30);
 /// assert_eq!(parse_duration("1m").unwrap().as_secs(), 60);
 /// assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
+/// assert_eq!(parse_duration("1h30m").unwrap().as_secs(), 5400);
 /// ```
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("duration string is empty".to_string());
     }
+    humantime::parse_duration(s).map_err(|e| e.to_string())
+}
 
-    let (num_str, unit) = s.split_at(s.len() - 1);
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number: {}", num_str))?;
+/// Parse timeout and interval for a collector configuration.
+///
+/// Returns `(timeout, interval)` durations.
+fn parse_collector_timing(
+    timeout: &str,
+    interval: &Option<String>,
+    collector_name: &str,
+) -> Result<(Duration, Duration), ConfigError> {
+    let timeout = parse_duration(timeout).map_err(|e| {
+        ConfigError::ValidationError(format!("{}: invalid timeout: {}", collector_name, e))
+    })?;
 
-    match unit {
-        "s" => Ok(Duration::from_secs(num)),
-        "m" => Ok(Duration::from_secs(num * 60)),
-        "h" => Ok(Duration::from_secs(num * 3600)),
-        _ => Err(format!("invalid unit: {}. Use 's', 'm', or 'h'", unit)),
-    }
+    let interval = match interval {
+        Some(i) => parse_duration(i).map_err(|e| {
+            ConfigError::ValidationError(format!("{}: invalid interval: {}", collector_name, e))
+        })?,
+        None => DEFAULT_INTERVAL,
+    };
+
+    Ok((timeout, interval))
 }
 
 #[cfg(test)]
@@ -406,15 +511,19 @@ mod tests {
                 channel_capacity: 1000,
                 checkpoint_interval: "5s".to_string(),
             },
-            collectors: vec![CollectorConfigEntry {
-                collector_type: MetricCategory::NetworkTcp,
-                name: "test-probe".to_string(),
-                target: "127.0.0.1:6379".to_string(),
-                interval: Some("30s".to_string()),
-                cron: None,
-                timeout: "5s".to_string(),
-                tags: BTreeMap::new(),
-            }],
+            collectors: CollectorsConfig {
+                tcp: vec![TcpCollectorConfig {
+                    name: "test-probe".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 6379,
+                    interval: Some("30s".to_string()),
+                    timeout: "5s".to_string(),
+                    tags: BTreeMap::new(),
+                    description: None,
+                }],
+                ping: vec![],
+                http: vec![],
+            },
         };
 
         assert!(config.validate().is_ok());
@@ -433,7 +542,7 @@ mod tests {
                 channel_capacity: 1000,
                 checkpoint_interval: "5s".to_string(),
             },
-            collectors: vec![],
+            collectors: CollectorsConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -452,7 +561,7 @@ mod tests {
                 channel_capacity: 1000,
                 checkpoint_interval: "5s".to_string(),
             },
-            collectors: vec![],
+            collectors: CollectorsConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -471,34 +580,38 @@ mod tests {
                 channel_capacity: 1000,
                 checkpoint_interval: "5s".to_string(),
             },
-            collectors: vec![CollectorConfigEntry {
-                collector_type: MetricCategory::NetworkTcp,
-                name: "test".to_string(),
-                target: "127.0.0.1:6379".to_string(),
-                interval: Some("invalid".to_string()),
-                cron: None,
-                timeout: "5s".to_string(),
-                tags: BTreeMap::new(),
-            }],
+            collectors: CollectorsConfig {
+                tcp: vec![TcpCollectorConfig {
+                    name: "test".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 6379,
+                    interval: Some("invalid".to_string()),
+                    timeout: "5s".to_string(),
+                    tags: BTreeMap::new(),
+                    description: None,
+                }],
+                ping: vec![],
+                http: vec![],
+            },
         };
 
         assert!(config.validate().is_err());
     }
 
     // =========================================================================
-    // CollectorConfigEntry conversion tests
+    // TcpCollectorConfig tests
     // =========================================================================
 
     #[test]
-    fn test_to_tcp_config_valid() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkTcp,
+    fn test_tcp_config_valid() {
+        let entry = TcpCollectorConfig {
             name: "redis".to_string(),
-            target: "127.0.0.1:6379".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 6379,
             interval: Some("30s".to_string()),
-            cron: None,
             timeout: "5s".to_string(),
             tags: BTreeMap::new(),
+            description: None,
         };
 
         let config = entry.to_tcp_config().unwrap();
@@ -510,15 +623,15 @@ mod tests {
     }
 
     #[test]
-    fn test_to_tcp_config_invalid_host() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkTcp,
+    fn test_tcp_config_invalid_host() {
+        let entry = TcpCollectorConfig {
             name: "test".to_string(),
-            target: "invalid-host:6379".to_string(),
+            host: "invalid-host".to_string(),
+            port: 6379,
             interval: Some("30s".to_string()),
-            cron: None,
             timeout: "5s".to_string(),
             tags: BTreeMap::new(),
+            description: None,
         };
 
         let result = entry.to_tcp_config();
@@ -531,33 +644,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_to_tcp_config_invalid_port() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkTcp,
-            name: "test".to_string(),
-            target: "127.0.0.1:not-a-port".to_string(),
-            interval: Some("30s".to_string()),
-            cron: None,
-            timeout: "5s".to_string(),
-            tags: BTreeMap::new(),
-        };
-
-        let result = entry.to_tcp_config();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid port"));
-    }
+    // =========================================================================
+    // PingCollectorConfig tests
+    // =========================================================================
 
     #[test]
-    fn test_to_ping_config_valid() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkPing,
+    fn test_ping_config_valid() {
+        let entry = PingCollectorConfig {
             name: "google-dns".to_string(),
-            target: "8.8.8.8".to_string(),
+            host: "8.8.8.8".to_string(),
             interval: Some("60s".to_string()),
-            cron: None,
             timeout: "3s".to_string(),
             tags: BTreeMap::new(),
+            description: None,
         };
 
         let config = entry.to_ping_config().unwrap();
@@ -568,36 +667,186 @@ mod tests {
     }
 
     #[test]
-    fn test_to_ping_config_hostname_valid() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkPing,
+    fn test_ping_config_hostname() {
+        let entry = PingCollectorConfig {
             name: "google".to_string(),
-            target: "google.com".to_string(), // hostname is now valid
+            host: "google.com".to_string(),
             interval: Some("30s".to_string()),
-            cron: None,
             timeout: "5s".to_string(),
             tags: BTreeMap::new(),
+            description: None,
         };
 
-        // PingCollector supports hostname resolution, so this should succeed
         let config = entry.to_ping_config().unwrap();
         assert_eq!(config.name, "google");
         assert_eq!(config.host, "google.com");
     }
 
+    // =========================================================================
+    // HttpCollectorConfig tests
+    // =========================================================================
+
     #[test]
-    fn test_to_ping_config_ipv6() {
-        let entry = CollectorConfigEntry {
-            collector_type: MetricCategory::NetworkPing,
-            name: "localhost-v6".to_string(),
-            target: "::1".to_string(),
+    fn test_http_config_valid() {
+        let entry = HttpCollectorConfig {
+            name: "google-health".to_string(),
+            url: "https://www.google.com".to_string(),
+            method: "GET".to_string(),
+            expected_status: 200,
             interval: Some("30s".to_string()),
-            cron: None,
-            timeout: "3s".to_string(),
+            timeout: "10s".to_string(),
             tags: BTreeMap::new(),
+            description: None,
         };
 
-        let config = entry.to_ping_config().unwrap();
-        assert_eq!(config.host, "::1");
+        let config = entry.to_http_config().unwrap();
+        assert_eq!(config.name, "google-health");
+        assert_eq!(config.url, "https://www.google.com");
+        assert_eq!(config.timeout, Duration::from_secs(10));
+        assert_eq!(config.interval, Duration::from_secs(30));
+        assert_eq!(config.expected_status, 200);
+    }
+
+    #[test]
+    fn test_http_config_custom_method() {
+        use crate::collector::http::HttpMethod;
+
+        let entry = HttpCollectorConfig {
+            name: "api-create".to_string(),
+            url: "https://api.example.com/create".to_string(),
+            method: "POST".to_string(),
+            expected_status: 201,
+            interval: Some("60s".to_string()),
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+            description: None,
+        };
+
+        let config = entry.to_http_config().unwrap();
+        assert_eq!(config.method, HttpMethod::Post);
+        assert_eq!(config.expected_status, 201);
+    }
+
+    #[test]
+    fn test_http_config_invalid_method() {
+        let entry = HttpCollectorConfig {
+            name: "test".to_string(),
+            url: "https://example.com".to_string(),
+            method: "INVALID".to_string(),
+            expected_status: 200,
+            interval: Some("30s".to_string()),
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+            description: None,
+        };
+
+        let result = entry.to_http_config();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid method"));
+    }
+
+    // =========================================================================
+    // New validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_duration_extended_formats() {
+        // humantime supports more formats
+        assert_eq!(parse_duration("100ms").unwrap(), Duration::from_millis(100));
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
+        assert_eq!(parse_duration("2h 30m").unwrap(), Duration::from_secs(9000));
+    }
+
+    #[test]
+    fn test_config_validation_invalid_bind_address() {
+        let config = AppConfig {
+            server: ServerConfig {
+                bind: "not-an-ip".to_string(),
+                port: 8080,
+            },
+            database: DatabaseConfig::default(),
+            collectors: CollectorsConfig::default(),
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid server bind address")
+        );
+    }
+
+    #[test]
+    fn test_config_validation_duplicate_collector_names() {
+        let config = AppConfig {
+            server: ServerConfig::default(),
+            database: DatabaseConfig::default(),
+            collectors: CollectorsConfig {
+                tcp: vec![TcpCollectorConfig {
+                    name: "duplicate".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 6379,
+                    interval: None,
+                    timeout: "5s".to_string(),
+                    tags: BTreeMap::new(),
+                    description: None,
+                }],
+                ping: vec![PingCollectorConfig {
+                    name: "duplicate".to_string(), // Same name as TCP collector
+                    host: "8.8.8.8".to_string(),
+                    interval: None,
+                    timeout: "3s".to_string(),
+                    tags: BTreeMap::new(),
+                    description: None,
+                }],
+                http: vec![],
+            },
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate collector name")
+        );
+    }
+
+    #[test]
+    fn test_http_config_invalid_url() {
+        let entry = HttpCollectorConfig {
+            name: "bad-url".to_string(),
+            url: "not-a-valid-url".to_string(),
+            method: "GET".to_string(),
+            expected_status: 200,
+            interval: None,
+            timeout: "5s".to_string(),
+            tags: BTreeMap::new(),
+            description: None,
+        };
+
+        let result = entry.to_http_config();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid URL"));
+    }
+
+    #[test]
+    fn test_server_config_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.bind, "0.0.0.0");
+        assert_eq!(config.port, 8080);
+    }
+
+    #[test]
+    fn test_database_config_default() {
+        let config = DatabaseConfig::default();
+        assert_eq!(config.path, "oculus.db");
+        assert_eq!(config.pool_size, DEFAULT_POOL_SIZE);
+        assert_eq!(config.channel_capacity, DEFAULT_CHANNEL_CAPACITY);
+        assert_eq!(config.checkpoint_interval, "5s");
     }
 }

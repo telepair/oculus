@@ -49,8 +49,8 @@ CREATE TABLE IF NOT EXISTS metric_values (
 /// SQL statement for creating event enums.
 pub const EVENTS_ENUMS_DDL: &str = r#"
 CREATE TYPE IF NOT EXISTS event_source_enum AS ENUM (
-    'collector.registry', 'collector.network.tcp', 'collector.network.ping', 'collector.network.http',
-    'rule.engine', 'system', 'other'
+    'collector.network.tcp', 'collector.network.ping', 'collector.network.http',
+    'rule.engine', 'system'
 );
 CREATE TYPE IF NOT EXISTS event_kind_enum AS ENUM ('alert', 'error', 'system', 'audit');
 CREATE TYPE IF NOT EXISTS event_severity_enum AS ENUM ('debug', 'info', 'warn', 'error', 'critical');

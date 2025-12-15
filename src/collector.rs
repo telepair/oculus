@@ -25,6 +25,7 @@
 //! # }
 //! ```
 
+pub mod http;
 pub mod ping;
 mod registry;
 pub mod tcp;

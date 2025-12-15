@@ -83,13 +83,15 @@ impl CollectorRegistry {
 
         // Upsert metric series during registration
         let series_id = collector.upsert_metric_series().inspect_err(|e| {
-            self.emit_job_error(
-                &name,
-                category_str,
-                0,
-                &schedule_desc.clone(),
-                e,
-                "upsert_series",
+            self.emit(
+                None,
+                EventSeverity::Error,
+                format!("Job '{}' upsert_series failed", name),
+                |p| {
+                    p.insert("collector".into(), name.clone());
+                    p.insert("category".into(), category_str.to_string());
+                    p.insert("error".into(), e.to_string());
+                },
             )
         })?;
 
@@ -98,13 +100,16 @@ impl CollectorRegistry {
             .create_job(Arc::clone(&collector), &name)
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
             .inspect_err(|e| {
-                self.emit_job_error(
-                    &name,
-                    category_str,
-                    series_id,
-                    &schedule_desc.clone(),
-                    e,
-                    "create",
+                self.emit(
+                    None,
+                    EventSeverity::Error,
+                    format!("Job '{}' create failed", name),
+                    |p| {
+                        p.insert("collector".into(), name.clone());
+                        p.insert("category".into(), category_str.to_string());
+                        p.insert("series_id".into(), series_id.to_string());
+                        p.insert("error".into(), e.to_string());
+                    },
                 )
             })?;
 
@@ -114,13 +119,16 @@ impl CollectorRegistry {
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
             .inspect_err(|e| {
-                self.emit_job_error(
-                    &name,
-                    category_str,
-                    series_id,
-                    &schedule_desc.clone(),
-                    e,
-                    "register",
+                self.emit(
+                    None,
+                    EventSeverity::Error,
+                    format!("Job '{}' register failed", name),
+                    |p| {
+                        p.insert("collector".into(), name.clone());
+                        p.insert("category".into(), category_str.to_string());
+                        p.insert("series_id".into(), series_id.to_string());
+                        p.insert("error".into(), e.to_string());
+                    },
                 )
             })?;
 
@@ -144,13 +152,18 @@ impl CollectorRegistry {
             "Metric series registered"
         );
 
-        self.emit_info(format!("Job created: {}", name), |p| {
-            p.insert("job_id".into(), job_id.to_string());
-            p.insert("collector".into(), name.clone());
-            p.insert("category".into(), category_str.to_string());
-            p.insert("schedule".into(), schedule_desc);
-            p.insert("series_id".into(), series_id.to_string());
-        });
+        self.emit(
+            Some(category_to_event_source(category)),
+            EventSeverity::Info,
+            format!("Job created: {}", name),
+            |p| {
+                p.insert("job_id".into(), job_id.to_string());
+                p.insert("collector".into(), name.clone());
+                p.insert("category".into(), category_str.to_string());
+                p.insert("schedule".into(), schedule_desc);
+                p.insert("series_id".into(), series_id.to_string());
+            },
+        );
 
         tracing::info!(collector = %name, job_id = %job_id, "Collector registered");
         Ok(job_id)
@@ -162,7 +175,12 @@ impl CollectorRegistry {
             .start()
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))?;
-        self.emit_info("Collector scheduler started", |_| {});
+        self.emit(
+            None,
+            EventSeverity::Info,
+            "Collector scheduler started",
+            |_| {},
+        );
         tracing::info!("Collector scheduler started");
         Ok(())
     }
@@ -196,26 +214,41 @@ impl CollectorRegistry {
         match shutdown_result {
             Ok(Ok(())) => {
                 tracing::info!("Collector scheduler shutdown complete");
-                self.emit(EventSeverity::Info, "Scheduler shutdown complete", |p| {
-                    p.insert("job_count".into(), job_count.to_string());
-                    p.insert("timed_out".into(), "false".into());
-                });
+                self.emit(
+                    None,
+                    EventSeverity::Info,
+                    "Scheduler shutdown complete",
+                    |p| {
+                        p.insert("job_count".into(), job_count.to_string());
+                        p.insert("timed_out".into(), "false".into());
+                    },
+                );
                 Ok(())
             }
             Ok(Err(err)) => {
-                self.emit(EventSeverity::Error, "Scheduler shutdown failed", |p| {
-                    p.insert("job_count".into(), job_count.to_string());
-                    p.insert("error".into(), err.to_string());
-                });
+                self.emit(
+                    None,
+                    EventSeverity::Error,
+                    "Scheduler shutdown failed",
+                    |p| {
+                        p.insert("job_count".into(), job_count.to_string());
+                        p.insert("error".into(), err.to_string());
+                    },
+                );
                 Err(err)
             }
             Err(_) => {
                 let err = CollectorError::Scheduler("scheduler shutdown timed out".to_string());
                 tracing::error!("Collector scheduler shutdown timed out");
-                self.emit(EventSeverity::Error, "Scheduler shutdown timed out", |p| {
-                    p.insert("job_count".into(), job_count.to_string());
-                    p.insert("timed_out".into(), "true".into());
-                });
+                self.emit(
+                    None,
+                    EventSeverity::Error,
+                    "Scheduler shutdown timed out",
+                    |p| {
+                        p.insert("job_count".into(), job_count.to_string());
+                        p.insert("timed_out".into(), "true".into());
+                    },
+                );
                 Err(err)
             }
         }
@@ -230,7 +263,7 @@ impl CollectorRegistry {
             .await
             .map_err(|e| CollectorError::Scheduler(e.to_string()))
             .inspect_err(|e| {
-                self.emit(EventSeverity::Error, "Job remove failed", |p| {
+                self.emit(None, EventSeverity::Error, "Job remove failed", |p| {
                     p.insert("job_id".into(), job_id.to_string());
                     if let Some(ref name) = job_name {
                         p.insert("collector".into(), name.clone());
@@ -241,7 +274,7 @@ impl CollectorRegistry {
 
         self.jobs.write().await.remove(job_id);
 
-        self.emit_info("Job removed", |p| {
+        self.emit(None, EventSeverity::Info, "Job removed", |p| {
             p.insert("job_id".into(), job_id.to_string());
             if let Some(ref name) = job_name {
                 p.insert("collector".into(), name.clone());
@@ -288,6 +321,7 @@ impl CollectorRegistry {
 
     fn emit(
         &self,
+        source: Option<EventSource>,
         severity: EventSeverity,
         message: impl Into<String>,
         build_payload: impl FnOnce(&mut EventPayload),
@@ -295,7 +329,7 @@ impl CollectorRegistry {
         let mut payload = EventPayload::new();
         build_payload(&mut payload);
         let event = Event::new(
-            EventSource::CollectorRegistry,
+            source.unwrap_or(EventSource::System),
             EventKind::System,
             severity,
             message,
@@ -305,33 +339,6 @@ impl CollectorRegistry {
             tracing::warn!(error = %e, "Failed to enqueue event");
         }
     }
-
-    fn emit_info(&self, message: impl Into<String>, build_payload: impl FnOnce(&mut EventPayload)) {
-        self.emit(EventSeverity::Info, message, build_payload);
-    }
-
-    fn emit_job_error(
-        &self,
-        name: &str,
-        category: &str,
-        metric_series_id: u64,
-        schedule: &str,
-        err: &CollectorError,
-        stage: &str,
-    ) {
-        self.emit(
-            EventSeverity::Error,
-            format!("Job '{}' {} failed", name, stage),
-            |p| {
-                p.insert("collector".into(), name.to_string());
-                p.insert("category".into(), category.to_string());
-                p.insert("metric_series_id".into(), metric_series_id.to_string());
-                p.insert("schedule".into(), schedule.to_string());
-                p.insert("error".into(), err.to_string());
-                p.insert("stage".into(), stage.to_string());
-            },
-        );
-    }
 }
 
 /// Map category to EventSource.
@@ -340,7 +347,7 @@ fn category_to_event_source(category: MetricCategory) -> EventSource {
         MetricCategory::NetworkTcp => EventSource::CollectorNetworkTcp,
         MetricCategory::NetworkPing => EventSource::CollectorNetworkPing,
         MetricCategory::NetworkHttp => EventSource::CollectorNetworkHttp,
-        _ => EventSource::Other,
+        _ => EventSource::System,
     }
 }
 
