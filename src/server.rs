@@ -4,7 +4,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -18,8 +18,8 @@ use tower_http::{
 };
 
 use crate::storage::{
-    Event, EventQuery, EventReader, EventSource, MetricCategory, MetricQuery, MetricReader,
-    SortOrder,
+    CollectorRecord, CollectorSource, CollectorStore, CollectorType, Event, EventQuery,
+    EventReader, EventSource, MetricCategory, MetricQuery, MetricReader, SortOrder,
 };
 
 /// Shared application state.
@@ -27,6 +27,7 @@ use crate::storage::{
 pub struct AppState {
     pub metric_reader: MetricReader,
     pub event_reader: EventReader,
+    pub collector_store: CollectorStore,
 }
 
 /// Health check response.
@@ -115,6 +116,22 @@ struct EventsTemplate {
 
 impl EventsTemplate {}
 
+/// Collectors table partial template.
+#[derive(Template)]
+#[template(path = "partials/collectors.html")]
+struct CollectorsTemplate {
+    collectors: Vec<CollectorRecord>,
+}
+
+impl CollectorsTemplate {
+    /// Format Unix milliseconds timestamp to human-readable string.
+    fn format_timestamp(ts_millis: &i64) -> String {
+        chrono::DateTime::from_timestamp_millis(*ts_millis)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".to_string())
+    }
+}
+
 /// Wrapper to render Askama templates as Axum responses.
 struct HtmlTemplate<T>(T);
 
@@ -144,6 +161,18 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/metrics", get(metrics_handler))
         .route("/api/metrics/stats", get(metrics_stats_handler))
         .route("/api/events", get(events_handler))
+        // Collector management API
+        .route("/api/collectors/html", get(collectors_html_handler))
+        .route(
+            "/api/collectors",
+            get(list_collectors_handler).post(create_collector_handler),
+        )
+        .route(
+            "/api/collectors/{type}/{name}",
+            get(get_collector_handler)
+                .put(update_collector_handler)
+                .delete(delete_collector_handler),
+        )
         .nest_service("/static", ServeDir::new("templates/static"))
         .layer(
             TraceLayer::new_for_http()
@@ -284,6 +313,216 @@ async fn events_handler(
     }
 }
 
+// =============================================================================
+// Collector Management API
+// =============================================================================
+
+/// Request body for creating/updating a collector.
+#[derive(Debug, Deserialize)]
+pub struct CollectorRequest {
+    /// Collector type (tcp, ping, http).
+    #[serde(rename = "type")]
+    pub collector_type: String,
+    /// Unique name for the collector.
+    pub name: String,
+    /// Whether the collector is enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Collector group name.
+    #[serde(default = "default_group")]
+    pub group: String,
+    /// Type-specific configuration.
+    pub config: serde_json::Value,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_group() -> String {
+    "default".to_string()
+}
+
+/// Path parameters for single collector operations.
+#[derive(Debug, Deserialize)]
+pub struct CollectorPath {
+    #[serde(rename = "type")]
+    pub collector_type: String,
+    pub name: String,
+}
+
+/// Collectors API endpoint - returns HTML partial for HTMX.
+async fn collectors_html_handler(State(state): State<Arc<AppState>>) -> Response {
+    match state.collector_store.list_all() {
+        Ok(collectors) => HtmlTemplate(CollectorsTemplate { collectors }).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list collectors");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error. Please check server logs.",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// List all collectors.
+async fn list_collectors_handler(State(state): State<Arc<AppState>>) -> Response {
+    match state.collector_store.list_all() {
+        Ok(collectors) => Json(collectors).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list collectors");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Get a single collector by type and name.
+async fn get_collector_handler(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<CollectorPath>,
+) -> Response {
+    let collector_type = match params.collector_type.parse::<CollectorType>() {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid collector type").into_response(),
+    };
+
+    match state.collector_store.get(collector_type, &params.name) {
+        Ok(Some(collector)) => Json(collector).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Collector not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get collector");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Create a new collector.
+async fn create_collector_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CollectorRequest>,
+) -> Response {
+    let collector_type = match req.collector_type.parse::<CollectorType>() {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid collector type").into_response(),
+    };
+
+    // Check if collector already exists
+    if let Ok(Some(_)) = state.collector_store.get(collector_type, &req.name) {
+        return (StatusCode::CONFLICT, "Collector already exists").into_response();
+    }
+
+    let record = CollectorRecord::from_api(
+        collector_type,
+        &req.name,
+        req.enabled,
+        &req.group,
+        req.config,
+    );
+
+    match state.collector_store.upsert(&record) {
+        Ok(id) => {
+            tracing::info!(id = id, name = %req.name, "Created collector");
+            (StatusCode::CREATED, Json(record)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create collector");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Update an existing collector.
+async fn update_collector_handler(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<CollectorPath>,
+    Json(req): Json<CollectorRequest>,
+) -> Response {
+    let collector_type = match params.collector_type.parse::<CollectorType>() {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid collector type").into_response(),
+    };
+
+    // Check if collector exists
+    let existing = match state.collector_store.get(collector_type, &params.name) {
+        Ok(Some(c)) => c,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Collector not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get collector");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Only API-created collectors can be updated via API
+    if existing.source != CollectorSource::Api {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cannot update config-sourced collector via API",
+        )
+            .into_response();
+    }
+
+    let record = CollectorRecord::from_api(
+        collector_type,
+        &params.name,
+        req.enabled,
+        &req.group,
+        req.config,
+    );
+
+    match state.collector_store.upsert(&record) {
+        Ok(_) => {
+            tracing::info!(name = %params.name, "Updated collector");
+            Json(record).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to update collector");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Delete a collector.
+async fn delete_collector_handler(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<CollectorPath>,
+) -> Response {
+    let collector_type = match params.collector_type.parse::<CollectorType>() {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid collector type").into_response(),
+    };
+
+    // Check if collector exists and is API-created
+    let existing = match state.collector_store.get(collector_type, &params.name) {
+        Ok(Some(c)) => c,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Collector not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get collector");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    if existing.source != CollectorSource::Api {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cannot delete config-sourced collector via API",
+        )
+            .into_response();
+    }
+
+    match state.collector_store.delete(collector_type, &params.name) {
+        Ok(true) => {
+            tracing::info!(name = %params.name, "Deleted collector");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "Collector not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to delete collector");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +547,7 @@ mod tests {
         let state = AppState {
             metric_reader: handles.metric_reader.clone(),
             event_reader: handles.event_reader.clone(),
+            collector_store: handles.collector_store.clone(),
         };
 
         // Return handles AND dir to keep tempdir alive

@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 
 use crate::storage::StorageError;
 use crate::storage::actor::{DEFAULT_BATCH_FLUSH_INTERVAL, DEFAULT_BATCH_SIZE, DbActor};
+use crate::storage::collector_store::CollectorStore;
 use crate::storage::pool::ReadPool;
 use crate::storage::{EventReader, MetricReader, RawSqlReader, StorageAdmin, StorageWriter};
 
@@ -132,6 +133,7 @@ impl StorageBuilder {
             writer: StorageWriter::new(tx.clone()),
             metric_reader: MetricReader::new(Arc::clone(&pool)),
             event_reader: EventReader::new(Arc::clone(&pool)),
+            collector_store: CollectorStore::new(Arc::clone(&pool)),
             raw_sql_reader: RawSqlReader::new(pool),
             admin: StorageAdmin::new(tx),
             actor_handle: Some(actor_handle),
@@ -147,6 +149,8 @@ pub struct StorageHandles {
     pub metric_reader: MetricReader,
     /// Facade for reading events.
     pub event_reader: EventReader,
+    /// Facade for collector CRUD operations.
+    pub collector_store: CollectorStore,
     /// Facade for executing raw SQL queries.
     pub raw_sql_reader: RawSqlReader,
     /// Facade for storage administration.

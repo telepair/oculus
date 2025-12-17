@@ -4,4 +4,4 @@
 
 mod collector;
 
-pub use collector::{HttpCollector, HttpConfig, HttpMethod};
+pub use collector::{HttpCollector, HttpConfig, HttpMethod, MetricExtraction, SuccessConditions};

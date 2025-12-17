@@ -41,6 +41,7 @@ askama_axum = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+serde_json_path = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
@@ -68,7 +69,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # Duration parsing and URL validation
 humantime = "2"
+humantime-serde = "1"
 url = "2"
+
+# Async utilities
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

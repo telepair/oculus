@@ -107,6 +107,28 @@
                   class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl"
                 ></div>
               </div>
+
+              <div
+                onclick="switchModule('collectors')"
+                id="nav-collectors"
+                class="group flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-200 relative overflow-hidden"
+              >
+                <!-- Active background gradient -->
+                <div
+                  class="hidden active-bg absolute inset-0 bg-gradient-to-r from-blue-500/20 to-purple-500/20 border border-blue-500/20 rounded-xl"
+                ></div>
+
+                <span
+                  class="text-xl relative z-10 transition-transform group-hover:scale-110 duration-200"
+                  >⚙️</span
+                >
+                <span class="font-medium relative z-10">Collectors</span>
+
+                <!-- Hover effect -->
+                <div
+                  class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl"
+                ></div>
+              </div>
             </div>
           </nav>
         </div>
@@ -672,6 +694,116 @@
             </div>
           </div>
         </section>
+
+        <!-- Collectors Module -->
+        <section
+          id="collectors"
+          class="hidden glass-panel rounded-2xl p-8 mb-8 animate-fade-in"
+        >
+          <div
+            class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 pb-6 border-b border-white/5 gap-4"
+          >
+            <div>
+              <h3
+                class="text-2xl font-semibold text-white flex items-center gap-3"
+              >
+                ⚙️
+                <span
+                  class="bg-gradient-to-r from-green-400 to-teal-400 bg-clip-text text-transparent"
+                  >Collectors</span
+                >
+              </h3>
+            </div>
+            <!-- Refresh Controls -->
+            <div class="flex items-center gap-4">
+              <!-- Last Updated -->
+              <span
+                id="collectors-last-updated"
+                class="text-xs text-neutral-400"
+              ></span>
+              <!-- Manual Refresh Button -->
+              <button
+                type="button"
+                onclick="refreshCollectors()"
+                class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium text-green-400 hover:text-green-300 hover:bg-green-500/10 transition-all"
+                title="Refresh now"
+              >
+                <svg
+                  class="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                Refresh
+              </button>
+              <!-- Loading Indicator for Collectors -->
+              <div
+                id="collectors-indicator"
+                class="htmx-indicator flex items-center gap-2 text-sm text-green-400"
+              >
+                <svg
+                  class="w-4 h-4 animate-spin"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  ></circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                Loading...
+              </div>
+            </div>
+          </div>
+
+          <div
+            id="collectors-alert"
+            class="hidden mb-4 rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+            role="alert"
+            aria-live="polite"
+          >
+            <span class="font-semibold">Collectors not available.</span>
+            <span data-alert-message class="ml-2"
+              >Waiting for a successful response…</span
+            >
+          </div>
+
+          <div
+            id="collectors-data"
+            data-alert-id="collectors-alert"
+            hx-get="/api/collectors/html"
+            hx-trigger="load"
+            hx-indicator="#collectors-indicator"
+            class="min-h-[300px] rounded-xl overflow-hidden bg-black/50 border border-white/10"
+          >
+            <div
+              class="flex flex-col items-center justify-center h-[300px] text-neutral-300 gap-4"
+            >
+              <div
+                class="w-8 h-8 border-2 border-green-500 border-t-transparent rounded-full animate-spin"
+              ></div>
+              <span class="text-sm font-medium animate-pulse"
+                >Loading collectors...</span
+              >
+            </div>
+          </div>
+        </section>
       </main>
     </div>
 
@@ -799,6 +931,11 @@
 
       function refreshEvents() {
         htmx.trigger(document.getElementById("events-form"), "submit");
+      }
+
+      function refreshCollectors() {
+        htmx.trigger(document.getElementById("collectors-data"), "load");
+        updateLastRefresh("collectors");
       }
 
       // Auto-refresh toggle handlers

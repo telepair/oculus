@@ -2,9 +2,11 @@
 //!
 //! Measures ICMP ping latency to a target host.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use surge_ping::{Client, Config, ICMP, PingIdentifier, PingSequence};
 use tokio::time::timeout;
 
@@ -22,21 +24,47 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Using -1.0 to distinguish from valid 0ms latency.
 const FAILURE_LATENCY_MS: f64 = -1.0;
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_group() -> String {
+    "default".to_string()
+}
+
+fn default_interval() -> Duration {
+    DEFAULT_INTERVAL
+}
+
+fn default_timeout() -> Duration {
+    DEFAULT_TIMEOUT
+}
+
 /// Configuration for ICMP ping probe.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingConfig {
     /// Unique name for this probe instance.
     pub name: String,
     /// Target host (hostname or IP address).
     pub host: String,
-    /// Static tags for identity.
-    pub static_tags: StaticTags,
-    /// Human-readable description.
-    pub description: Option<String>,
-    /// Collection interval.
+    /// Enable this collector (default: true).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Collector group for organization (default: "default").
+    #[serde(default = "default_group")]
+    pub group: String,
+    /// Collection interval (default: 30s).
+    #[serde(default = "default_interval", with = "humantime_serde")]
     pub interval: Duration,
-    /// Probe timeout.
+    /// Probe timeout (default: 3s).
+    #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Duration,
+    /// Static tags for identity.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl PingConfig {
@@ -45,9 +73,11 @@ impl PingConfig {
         Self {
             name: name.into(),
             host: host.into(),
+            enabled: true,
+            group: "default".to_string(),
             interval: DEFAULT_INTERVAL,
             timeout: DEFAULT_TIMEOUT,
-            static_tags: StaticTags::new(),
+            tags: BTreeMap::new(),
             description: None,
         }
     }
@@ -58,6 +88,11 @@ impl PingConfig {
     pub fn validate(&self) -> Result<(), IpValidationError> {
         validate_ip_address(&self.host)?;
         Ok(())
+    }
+
+    /// Get static tags as StaticTags type.
+    pub fn static_tags(&self) -> StaticTags {
+        self.tags.clone()
     }
 
     /// Set the collection interval.
@@ -74,13 +109,25 @@ impl PingConfig {
 
     /// Set static tags.
     pub fn with_static_tags(mut self, tags: StaticTags) -> Self {
-        self.static_tags = tags;
+        self.tags = tags;
         self
     }
 
     /// Set description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Set enabled.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set group.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = group.into();
         self
     }
 }
@@ -101,7 +148,7 @@ impl PingCollector {
             MetricCategory::NetworkPing,
             &config.name,
             &config.host,
-            &config.static_tags,
+            &config.static_tags(),
         );
 
         Self {
@@ -157,7 +204,7 @@ impl Collector for PingCollector {
             MetricCategory::NetworkPing,
             self.config.name.clone(),
             self.config.host.clone(),
-            self.config.static_tags.clone(),
+            self.config.static_tags(),
             self.config.description.clone(),
         );
 

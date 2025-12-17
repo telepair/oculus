@@ -62,9 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Load configuration from file
+    // Load configuration from file (including collector_path directory if specified)
     tracing::info!("Loading configuration from: {}", cli.config);
-    let mut config = AppConfig::load(&cli.config)?;
+    let mut config = AppConfig::load_with_collector_path(&cli.config)?;
 
     // Apply CLI/env overrides (CLI > ENV > config file)
     if let Some(bind) = cli.server_bind {
@@ -118,65 +118,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn TCP collectors
     for tcp_config in &config.collectors.tcp {
-        let collector_config = tcp_config
-            .to_tcp_config()
-            .map_err(|e| format!("Failed to parse TCP collector '{}': {}", tcp_config.name, e))?;
+        if !tcp_config.enabled {
+            tracing::debug!(
+                "Skipping disabled collector: {} (tcp, group={})",
+                tcp_config.name,
+                tcp_config.group,
+            );
+            continue;
+        }
 
-        let collector = TcpCollector::new(collector_config, handles.writer.clone());
+        let collector = TcpCollector::new(tcp_config.clone(), handles.writer.clone());
         registry
             .spawn(collector)
             .await
             .map_err(|e| format!("Failed to spawn collector '{}': {}", tcp_config.name, e))?;
 
         tracing::info!(
-            "Spawned collector: {} (tcp, host={}:{})",
+            "Spawned collector: {} (tcp, host={}:{}, group={})",
             tcp_config.name,
             tcp_config.host,
             tcp_config.port,
+            tcp_config.group,
         );
     }
 
     // Spawn ping collectors
     for ping_config in &config.collectors.ping {
-        let collector_config = ping_config.to_ping_config().map_err(|e| {
-            format!(
-                "Failed to parse Ping collector '{}': {}",
-                ping_config.name, e
-            )
-        })?;
+        if !ping_config.enabled {
+            tracing::debug!(
+                "Skipping disabled collector: {} (ping, group={})",
+                ping_config.name,
+                ping_config.group,
+            );
+            continue;
+        }
 
-        let collector = PingCollector::new(collector_config, handles.writer.clone());
+        let collector = PingCollector::new(ping_config.clone(), handles.writer.clone());
         registry
             .spawn(collector)
             .await
             .map_err(|e| format!("Failed to spawn collector '{}': {}", ping_config.name, e))?;
 
         tracing::info!(
-            "Spawned collector: {} (ping, host={})",
+            "Spawned collector: {} (ping, host={}, group={})",
             ping_config.name,
             ping_config.host,
+            ping_config.group,
         );
     }
 
     // Spawn HTTP collectors
     for http_config in &config.collectors.http {
-        let collector_config = http_config.to_http_config().map_err(|e| {
-            format!(
-                "Failed to parse HTTP collector '{}': {}",
-                http_config.name, e
-            )
-        })?;
+        if !http_config.enabled {
+            tracing::debug!(
+                "Skipping disabled collector: {} (http, group={})",
+                http_config.name,
+                http_config.group,
+            );
+            continue;
+        }
 
-        let collector = HttpCollector::new(collector_config, handles.writer.clone());
+        let collector = HttpCollector::new(http_config.clone(), handles.writer.clone());
         registry
             .spawn(collector)
             .await
             .map_err(|e| format!("Failed to spawn collector '{}': {}", http_config.name, e))?;
 
         tracing::info!(
-            "Spawned collector: {} (http, url={})",
+            "Spawned collector: {} (http, url={}, group={})",
             http_config.name,
             http_config.url,
+            http_config.group,
         );
     }
 
@@ -184,6 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = AppState {
         metric_reader: handles.metric_reader.clone(),
         event_reader: handles.event_reader.clone(),
+        collector_store: handles.collector_store.clone(),
     };
 
     // Build Axum router

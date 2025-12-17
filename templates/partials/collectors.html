@@ -1,0 +1,96 @@
+<table class="w-full text-sm">
+  <thead class="table-head text-left">
+    <tr>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Type
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Name
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Target
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Group
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Enabled
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Source
+      </th>
+      <th
+        class="px-4 py-3 font-semibold text-neutral-200 uppercase tracking-wider text-xs table-head-cell"
+      >
+        Updated
+      </th>
+    </tr>
+  </thead>
+  <tbody class="table-body divide-y divide-white/10">
+    {% if collectors.is_empty() %}
+    <tr>
+      <td colspan="7" class="px-4 py-12 text-center text-neutral-300">
+        <div class="flex flex-col items-center gap-2">
+          <span class="text-3xl">⚙️</span>
+          <span>No collectors configured</span>
+        </div>
+      </td>
+    </tr>
+    {% else %} {% for c in collectors %}
+    <tr class="table-row table-row-hover">
+      <td class="px-4 py-3">
+        {% match c.collector_type %}
+        {% when crate::storage::CollectorType::Tcp %}
+        <span class="badge badge-info badge-strong text-xs" title="TCP port probe">TCP</span>
+        {% when crate::storage::CollectorType::Ping %}
+        <span class="badge badge-info badge-strong text-xs" title="ICMP ping probe">Ping</span>
+        {% when crate::storage::CollectorType::Http %}
+        <span class="badge badge-info badge-strong text-xs" title="HTTP endpoint probe">HTTP</span>
+        {% endmatch %}
+      </td>
+      <td class="px-4 py-3 text-neutral-100 font-medium">{{ c.name }}</td>
+      <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
+        {% match c.collector_type %}
+        {% when crate::storage::CollectorType::Tcp %}
+        {{ c.config["host"].as_str().unwrap_or("-") }}:{{ c.config["port"].as_u64().unwrap_or(0) }}
+        {% when crate::storage::CollectorType::Ping %}
+        {{ c.config["host"].as_str().unwrap_or("-") }}
+        {% when crate::storage::CollectorType::Http %}
+        {{ c.config["url"].as_str().unwrap_or("-") }}
+        {% endmatch %}
+      </td>
+      <td class="px-4 py-3 text-neutral-200 text-xs">{{ c.group_name }}</td>
+      <td class="px-4 py-3">
+        {% if c.enabled %}
+        <span class="badge badge-success badge-strong text-xs" title="Enabled">✓ On</span>
+        {% else %}
+        <span class="badge badge-neutral text-xs" title="Disabled">Off</span>
+        {% endif %}
+      </td>
+      <td class="px-4 py-3">
+        {% match c.source %}
+        {% when crate::storage::CollectorSource::Config %}
+        <span class="badge badge-neutral text-xs" title="From configuration file">config</span>
+        {% when crate::storage::CollectorSource::Api %}
+        <span class="badge badge-info text-xs" title="Created via API">api</span>
+        {% endmatch %}
+      </td>
+      <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
+        {{ Self::format_timestamp(c.updated_at) }}
+      </td>
+    </tr>
+    {% endfor %} {% endif %}
+  </tbody>
+</table>

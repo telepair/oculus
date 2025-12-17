@@ -8,22 +8,33 @@ database:
   channel_capacity: 10000
   checkpoint_interval: 5s
 
+# Collector sync interval for dynamic management (default: 10s, min: 1s)
+collector_sync_interval: 10s
+
+# Optional: Load additional collector configs from directory
+# collector_path: configs/collectors/
+
 collectors:
   tcp:
     # Probing Google DNS (8.8.8.8:53)
     - name: google-dns
       host: 8.8.8.8
       port: 53
+      enabled: true          # Enable/disable this collector (default: true)
+      group: production      # Group for organization (default: "default")
       interval: 5s
       timeout: 5s
       tags:
         env: production
         service: external
+      description: "Google Public DNS TCP probe"
 
-    # Failing probe (localhost:9999)
-    - name: localhost-fail
+    # Disabled probe example
+    - name: localhost-disabled
       host: 127.0.0.1
       port: 9999
+      enabled: false         # Disabled collectors won't be started
+      group: local
       interval: 5s
       timeout: 1s
       tags:
@@ -34,6 +45,8 @@ collectors:
     # ICMP ping probe (Google DNS)
     - name: google-dns-ping
       host: 8.8.8.8
+      enabled: true
+      group: production
       interval: 30s
       timeout: 3s
       tags:
@@ -43,6 +56,8 @@ collectors:
     # ICMP ping probe (Cloudflare DNS)
     - name: cloudflare-dns-ping
       host: 1.1.1.1
+      enabled: true
+      group: production
       interval: 30s
       timeout: 3s
       tags:
@@ -53,10 +68,39 @@ collectors:
     # HTTP probe (Google)
     - name: google-health
       url: https://www.google.com
+      enabled: true
+      group: production
       method: GET
       expected_status: 200
-      interval: 30s
+      interval: 30s          # Use interval for fixed schedule
       timeout: 10s
       tags:
         env: production
         service: external
+      description: "Google homepage health check"
+
+    # HTTP probe with cron schedule
+    # - name: cron-example
+    #   url: https://api.example.com/health
+    #   enabled: true
+    #   group: production
+    #   method: GET
+    #   expected_status: 200
+    #   cron: "0 */5 * * * *"  # Every 5 minutes (cron schedule, mutually exclusive with interval)
+    #   timeout: 10s
+
+    # HTTP probe with headers (supports ${VAR:-default} syntax)
+    # - name: api-with-auth
+    #   url: https://api.example.com/protected
+    #   enabled: true
+    #   group: production
+    #   method: GET
+    #   expected_status: 200
+    #   interval: 60s
+    #   timeout: 10s
+    #   headers:
+    #     Authorization: "Bearer ${API_TOKEN:-default-token}"
+    #     X-Custom-Header: "custom-value"
+    #   success_conditions:
+    #     status_codes: [200, 201]
+    #     body_jsonpath: "$.status"

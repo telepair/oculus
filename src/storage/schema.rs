@@ -72,6 +72,32 @@ CREATE TABLE IF NOT EXISTS events (
 );
 "#;
 
+/// SQL statement for creating collector enums.
+pub const COLLECTOR_ENUMS_DDL: &str = r#"
+CREATE TYPE IF NOT EXISTS collector_type_enum AS ENUM ('tcp', 'ping', 'http');
+CREATE TYPE IF NOT EXISTS collector_source_enum AS ENUM ('config', 'api');
+"#;
+
+/// SQL statement for creating the collectors table.
+///
+/// Stores collector configurations with source tracking.
+/// Same type cannot have duplicate names (enforced by unique constraint).
+pub const COLLECTORS_TABLE_DDL: &str = r#"
+CREATE SEQUENCE IF NOT EXISTS collectors_id_seq;
+CREATE TABLE IF NOT EXISTS collectors (
+    id          BIGINT PRIMARY KEY DEFAULT NEXTVAL('collectors_id_seq'),
+    type        collector_type_enum NOT NULL,
+    name        VARCHAR NOT NULL,
+    source      collector_source_enum NOT NULL,
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    group_name  VARCHAR NOT NULL DEFAULT 'default',
+    config      VARCHAR NOT NULL,
+    created_at  BIGINT NOT NULL,
+    updated_at  BIGINT NOT NULL,
+    UNIQUE(type, name)
+);
+"#;
+
 /// Initialize the database schema.
 ///
 /// Creates all necessary tables and enums if they don't exist.
@@ -81,6 +107,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(METRIC_VALUES_TABLE_DDL)?;
     conn.execute_batch(EVENTS_ENUMS_DDL)?;
     conn.execute_batch(EVENTS_TABLE_DDL)?;
+    conn.execute_batch(COLLECTOR_ENUMS_DDL)?;
+    conn.execute_batch(COLLECTORS_TABLE_DDL)?;
 
     tracing::info!("Database schema initialized");
     Ok(())

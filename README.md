@@ -103,66 +103,60 @@ make doc-open   # Build and view documentation
 
 ## Configuration
 
-Oculus uses a YAML configuration file for collectors and rules:
+Oculus uses a YAML configuration file for server, database, and collectors:
 
 ```yaml
 # Example: configs/config.yaml
+server:
+  bind: 0.0.0.0
+  port: 8080
+
+database:
+  path: data/oculus.db
+  pool_size: 4
+  channel_capacity: 10000
+  checkpoint_interval: 5s
+
+# Collector sync interval for dynamic management (default: 10s, min: 1s)
+collector_sync_interval: 10s
+
 collectors:
-  # Crypto price collector
-  - type: crypto
-    asset: btc_usd
-    source: coingecko
-    interval: 60s
+  tcp:
+    - name: google-dns
+      host: 8.8.8.8
+      port: 53
+      enabled: true
+      group: production
+      interval: 5s
+      timeout: 5s
+      tags:
+        env: production
 
-  # Stock price collector
-  - type: stock
-    symbol: TSLA
-    source: yahoo
-    interval: 5m
+  ping:
+    - name: cloudflare-ping
+      host: 1.1.1.1
+      enabled: true
+      group: production
+      interval: 30s
+      timeout: 3s
 
-  # Polymarket collector
-  - type: polymarket
-    market_id: some-market-id
-    interval: 30s
-
-  # Network probe
-  - type: network.http
-    target: https://api.example.com/health
-    interval: 30s
-
-  # Generic API collector (RESTful)
-  - type: api
-    name: custom_metric
-    url: https://api.example.com/v1/data
-    method: GET
-    json_path: $.data.value
-    interval: 60s
-
-rules:
-  - name: btc_price_alert
-    condition: "crypto.price.btc_usd > 100000"
-    severity: info
-    channels: [telegram, log]
-
-  - name: api_slow_response
-    condition: "network.http.api_example.rtt > 1000"
-    severity: warn
-    channels: [slack, webhook]
-    action:
-      type: http_post
-      url: https://automation.example.com/trigger
-
-notifications:
-  telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    chat_id: ${TELEGRAM_CHAT_ID}
-
-  webhook:
-    url: https://hooks.example.com/notify
-
-  slack:
-    webhook_url: ${SLACK_WEBHOOK_URL}
+  http:
+    - name: api-health
+      url: https://api.example.com/health
+      enabled: true
+      group: production
+      method: GET
+      expected_status: 200
+      interval: 30s
+      timeout: 10s
+      headers:
+        Authorization: "Bearer ${API_TOKEN:-default}"
+      success_conditions:
+        status_codes: [200, 201]
+        body_jsonpath: "$.status"
 ```
+
+> 📖 See `configs/config.example.yaml` for complete configuration options.
 
 ## API Endpoints
 
