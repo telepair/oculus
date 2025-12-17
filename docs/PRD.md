@@ -3,9 +3,9 @@
 | Metadata        | Value                                              |
 | --------------- | -------------------------------------------------- |
 | Project         | Oculus (Repository: telepair/oculus)               |
-| Version         | v0.1.0 (Genesis / MVP)                             |
+| Version         | v0.1.3                                             |
 | Status          | Confirmed / Ready for Development                  |
-| Last Updated    | 2025-12-12                                         |
+| Last Updated    | 2025-12-17                                         |
 | Core Philosophy | Value Monitoring, Single Binary, Zero Dependencies |
 
 ---
@@ -31,12 +31,12 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 | Network Metrics    | HTTP RTT, HTTP Status Code                           |
 | Custom Values      | Any RESTful API endpoint                             |
 
-**v0.1.0 Goals:**
+**v0.1.x Goals:**
 
-- Validate the "Rust + DuckDB + HTMX" tech stack
+- Validate the "Rust + SQLite + HTMX" tech stack
 - Build a zero-dependency single binary application
 - Complete the data pipeline: Collection → Persistence → [Rule Engine] → Notifications/Actions
-- Explicitly **out of scope** for v0.1.0: any user/account/role management.
+- Explicitly **out of scope** for v0.1.x: any user/account/role management.
 
 ---
 
@@ -49,7 +49,7 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 | Language      | Rust (Edition 2024)    | Memory safety, zero GC pause, ideal for daemons |
 | Async Runtime | Tokio                  | High-concurrency I/O and task scheduling        |
 | Web Framework | Axum                   | Lightweight, modular, Tokio-native              |
-| Database      | DuckDB (Embedded)      | Single-file OLAP, columnar storage, rich SQL    |
+| Database      | SQLite (Embedded)      | Single-file storage, mature ecosystem           |
 | Frontend      | HTMX                   | AJAX via HTML attributes, no JS build required  |
 | Templating    | Askama                 | Type-safe, compiles to Rust, SSR performance    |
 | Styling       | Tailwind CSS (Bundled) | Prebuilt CSS shipped with binary (offline)      |
@@ -94,7 +94,7 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 │                              │                                                   │
 │                              ▼                                                   │
 │                     ┌────────────────┐                                          │
-│                     │   oculus.db    │  DuckDB (Embedded OLAP)                  │
+│                     │   oculus.db    │  SQLite/PostgreSQL                       │
 │                     └────────┬───────┘                                          │
 └──────────────────────────────┼──────────────────────────────────────────────────┘
                                │
@@ -155,7 +155,7 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 |                  | Prediction Market | Polymarket odds and prices                              |
 |                  | Network Probe     | HTTP RTT, HTTP status code, TCP connect, ICMP ping      |
 |                  | Generic API       | RESTful API with JSON path extraction                   |
-| **Storage**      | DuckDB            | Embedded OLAP database, single-file columnar storage    |
+| **Storage**      | SQLite/PostgreSQL | Embedded or external database                           |
 | **Rule Engine**  | Simple Rules      | YAML/TOML-based threshold and range checks              |
 |                  | Complex Rules     | Raw SQL for advanced multi-metric analysis              |
 |                  | Derived Values    | Calculate new values from existing metrics              |
@@ -202,7 +202,7 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 - Default retention window: 7 days (configurable)
 - Cleanup policy: run on startup and hourly
   `DELETE FROM metrics WHERE ts < now() - interval '7 days'`
-- Compression: DuckDB automatic; optional daily `VACUUM`
+- Compression: SQLite/PostgreSQL native; optional `VACUUM`
 
 ---
 
@@ -331,12 +331,12 @@ GROUP BY symbol
 HAVING volatility > avg_price * 0.05
 ```
 
-| Feature          | Description                                        |
-| ---------------- | -------------------------------------------------- |
-| Full SQL Support | DuckDB SQL with window functions, CTEs, aggregates |
-| Scheduled Exec   | Cron-like schedule (e.g., `*/5 * * * *`)           |
-| Result Binding   | Map query results to alert templates               |
-| Parameterization | Dynamic thresholds from config                     |
+| Feature          | Description                                 |
+| ---------------- | ------------------------------------------- |
+| Full SQL Support | SQL with window functions, CTEs, aggregates |
+| Scheduled Exec   | Cron-like schedule (e.g., `*/5 * * * *`)    |
+| Result Binding   | Map query results to alert templates        |
+| Parameterization | Dynamic thresholds from config              |
 
 #### [Rule-03] Derived Values
 

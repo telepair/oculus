@@ -459,10 +459,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_lifecycle() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let handles = StorageBuilder::new(&db_path).build().unwrap();
+        let handles = StorageBuilder::new("sqlite::memory:")
+            .build()
+            .await
+            .unwrap();
         let writer = handles.writer.clone();
         let registry = CollectorRegistry::new(writer.clone()).await.unwrap();
 
@@ -484,7 +484,7 @@ mod tests {
 
         // Shutdown
         registry.shutdown().await.unwrap();
-        handles.shutdown().unwrap();
+        handles.shutdown().await.unwrap();
     }
 
     #[tokio::test]

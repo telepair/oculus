@@ -51,40 +51,58 @@
     {% else %} {% for c in collectors %}
     <tr class="table-row table-row-hover">
       <td class="px-4 py-3">
-        {% match c.collector_type %}
-        {% when crate::storage::CollectorType::Tcp %}
-        <span class="badge badge-info badge-strong text-xs" title="TCP port probe">TCP</span>
+        {% match c.collector_type %} {% when crate::storage::CollectorType::Tcp
+        %}
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="TCP port probe"
+          >TCP</span
+        >
         {% when crate::storage::CollectorType::Ping %}
-        <span class="badge badge-info badge-strong text-xs" title="ICMP ping probe">Ping</span>
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="ICMP ping probe"
+          >Ping</span
+        >
         {% when crate::storage::CollectorType::Http %}
-        <span class="badge badge-info badge-strong text-xs" title="HTTP endpoint probe">HTTP</span>
+        <span
+          class="badge badge-info badge-strong text-xs"
+          title="HTTP endpoint probe"
+          >HTTP</span
+        >
         {% endmatch %}
       </td>
       <td class="px-4 py-3 text-neutral-100 font-medium">{{ c.name }}</td>
       <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
-        {% match c.collector_type %}
-        {% when crate::storage::CollectorType::Tcp %}
-        {{ c.config["host"].as_str().unwrap_or("-") }}:{{ c.config["port"].as_u64().unwrap_or(0) }}
-        {% when crate::storage::CollectorType::Ping %}
-        {{ c.config["host"].as_str().unwrap_or("-") }}
-        {% when crate::storage::CollectorType::Http %}
-        {{ c.config["url"].as_str().unwrap_or("-") }}
-        {% endmatch %}
+        {% match c.collector_type %} {% when crate::storage::CollectorType::Tcp
+        %} {{ c.config["host"].as_str().unwrap_or("-") }}:{{
+        c.config["port"].as_u64().unwrap_or(0) }} {% when
+        crate::storage::CollectorType::Ping %} {{
+        c.config["host"].as_str().unwrap_or("-") }} {% when
+        crate::storage::CollectorType::Http %} {{
+        c.config["url"].as_str().unwrap_or("-") }} {% endmatch %}
       </td>
       <td class="px-4 py-3 text-neutral-200 text-xs">{{ c.group_name }}</td>
       <td class="px-4 py-3">
         {% if c.enabled %}
-        <span class="badge badge-success badge-strong text-xs" title="Enabled">✓ On</span>
+        <span class="badge badge-success badge-strong text-xs" title="Enabled"
+          >✓ On</span
+        >
         {% else %}
         <span class="badge badge-neutral text-xs" title="Disabled">Off</span>
         {% endif %}
       </td>
       <td class="px-4 py-3">
-        {% match c.source %}
-        {% when crate::storage::CollectorSource::Config %}
-        <span class="badge badge-neutral text-xs" title="From configuration file">config</span>
+        {% match c.source %} {% when crate::storage::CollectorSource::Config %}
+        <span
+          class="badge badge-neutral text-xs"
+          title="From configuration file"
+          >config</span
+        >
         {% when crate::storage::CollectorSource::Api %}
-        <span class="badge badge-info text-xs" title="Created via API">api</span>
+        <span class="badge badge-info text-xs" title="Created via API"
+          >api</span
+        >
         {% endmatch %}
       </td>
       <td class="px-4 py-3 text-neutral-200 font-mono text-xs">
@@ -94,3 +112,66 @@
     {% endfor %} {% endif %}
   </tbody>
 </table>
+
+<!-- Pagination -->
+{% if total_pages > 1 %}
+<div
+  class="flex items-center justify-between px-4 py-3 border-t border-white/10"
+>
+  <div class="text-sm text-neutral-400">
+    Showing {{ (page - 1) * page_size + 1 }}-{{ (page - 1) * page_size + count
+    }} of {{ total_count }} collectors
+  </div>
+  <div class="flex items-center gap-1">
+    {% if page > 1 %}
+    <button
+      class="btn btn-sm btn-ghost"
+      hx-get="/api/collectors/html?page=1&page_size={{ page_size }}"
+      hx-target="#collectors-content"
+      hx-swap="innerHTML"
+      title="First page"
+    >
+      «
+    </button>
+    <button
+      class="btn btn-sm btn-ghost"
+      hx-get="/api/collectors/html?page={{ page - 1 }}&page_size={{ page_size }}"
+      hx-target="#collectors-content"
+      hx-swap="innerHTML"
+      title="Previous page"
+    >
+      ‹
+    </button>
+    {% endif %}
+
+    <span class="px-3 py-1 text-sm text-neutral-300">
+      Page {{ page }} of {{ total_pages }}
+    </span>
+
+    {% if page < total_pages %}
+    <button
+      class="btn btn-sm btn-ghost"
+      hx-get="/api/collectors/html?page={{ page + 1 }}&page_size={{ page_size }}"
+      hx-target="#collectors-content"
+      hx-swap="innerHTML"
+      title="Next page"
+    >
+      ›
+    </button>
+    <button
+      class="btn btn-sm btn-ghost"
+      hx-get="/api/collectors/html?page={{ total_pages }}&page_size={{ page_size }}"
+      hx-target="#collectors-content"
+      hx-swap="innerHTML"
+      title="Last page"
+    >
+      »
+    </button>
+    {% endif %}
+  </div>
+</div>
+{% else if total_count > 0 %}
+<div class="px-4 py-3 text-sm text-neutral-400 border-t border-white/10">
+  Showing {{ total_count }} collector{% if total_count > 1 %}s{% endif %}
+</div>
+{% endif %}

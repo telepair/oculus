@@ -15,14 +15,15 @@
 //! use oculus::{TcpCollector, TcpConfig, StorageBuilder};
 //! use std::time::Duration;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let handles = StorageBuilder::new("/tmp/test.db").build()?;
-//! let config = TcpConfig::new("redis-probe", "127.0.0.1", 6379)
-//!     .with_interval(Duration::from_secs(30));
-//! let collector = TcpCollector::new(config, handles.writer.clone());
-//! // registry.spawn(collector);
-//! # Ok(())
-//! # }
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let handles = StorageBuilder::new("sqlite:/tmp/test.db?mode=rwc").build().await?;
+//!     let config = TcpConfig::new("redis-probe", "127.0.0.1", 6379)
+//!         .with_interval(Duration::from_secs(30));
+//!     let collector = TcpCollector::new(config, handles.writer.clone());
+//!     // registry.spawn(collector);
+//!     Ok(())
+//! }
 //! ```
 
 pub mod http;

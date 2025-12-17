@@ -1,23 +1,23 @@
 //! Storage Layer
 //!
-//! High-performance DuckDB storage with read/write separation:
-//! - **Writer**: Single dedicated thread with exclusive Connection using MPSC + Appender
-//! - **Reader**: Connection pool using try_clone() for concurrent reads
+//! High-performance SQLite storage with async read/write separation:
+//! - **Writer**: Async task with exclusive writes using tokio mpsc channel
+//! - **Reader**: Connection pool for concurrent reads
 //!
 //! # Components
 //!
-//! - [`StorageWriter`]: Unified write facade for metrics and events via MPSC channel
-//! - [`MetricReader`] / [`EventReader`] / [`RawSqlReader`]: Sync read facades via pool
-//! - [`CollectorStore`]: Collector configuration CRUD and sync operations
+//! - [`StorageWriter`]: Unified write facade for metrics and events via async channel
+//! - [`MetricReader`] / [`EventReader`]: Async read facades
+//! - [`CollectorStore`]: Collector configuration CRUD operations
 //! - [`StorageAdmin`]: Cleanup and maintenance operations
 //! - [`StorageBuilder`] / [`StorageHandles`]: Initialization and lifecycle management
 
 mod actor;
 mod builder;
 pub mod collector_store;
+pub mod db;
 mod error;
 mod facades;
-mod pool;
 mod schema;
 mod types;
 
@@ -28,7 +28,7 @@ pub use collector_store::{
 pub use error::StorageError;
 pub use facades::{
     CategoryStats, EventQuery, EventReader, MetricQuery, MetricReader, MetricResult, MetricStats,
-    RawSqlReader, SortOrder, StorageAdmin, StorageWriter,
+    SortOrder, StorageAdmin, StorageWriter,
 };
 pub use types::{
     DynamicTags, Event, EventKind, EventPayload, EventSeverity, EventSource, MetricCategory,

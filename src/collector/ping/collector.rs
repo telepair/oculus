@@ -91,8 +91,8 @@ impl PingConfig {
     }
 
     /// Get static tags as StaticTags type.
-    pub fn static_tags(&self) -> StaticTags {
-        self.tags.clone()
+    pub fn static_tags(&self) -> &StaticTags {
+        &self.tags
     }
 
     /// Set the collection interval.
@@ -148,7 +148,7 @@ impl PingCollector {
             MetricCategory::NetworkPing,
             &config.name,
             &config.host,
-            &config.static_tags(),
+            config.static_tags(),
         );
 
         Self {
@@ -204,7 +204,7 @@ impl Collector for PingCollector {
             MetricCategory::NetworkPing,
             self.config.name.clone(),
             self.config.host.clone(),
-            self.config.static_tags(),
+            self.config.static_tags().clone(),
             self.config.description.clone(),
         );
 

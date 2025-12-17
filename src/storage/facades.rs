@@ -1,30 +1,29 @@
 //! User-facing storage facades.
 //!
 //! Provides ergonomic APIs for storage operations:
-//! - `StorageWriter`: Non-blocking writes via MPSC
+//! - `StorageWriter`: Non-blocking writes via async channel
 //! - `MetricReader`: Query metrics (series + values JOIN)
 //! - `EventReader`: Query events
-//! - `RawSqlReader`: Execute raw SELECT queries
 //! - `StorageAdmin`: Cleanup and maintenance
 
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::Value;
+use serde::Serialize;
+use sqlx::Row;
 use strum_macros::{AsRefStr, EnumString};
+use tokio::sync::mpsc::Sender;
 
 use crate::storage::StorageError;
 use crate::storage::actor::Command;
-use crate::storage::pool::ReadPool;
+use crate::storage::db::SqlitePool;
 use crate::storage::types::{
     DynamicTags, Event, EventKind, EventSeverity, EventSource, MetricCategory, MetricSeries,
     MetricValue, StaticTags,
 };
-use serde::Serialize;
 
 // =============================================================================
 // Constants
@@ -126,10 +125,9 @@ pub struct MetricStats {
 /// Non-blocking storage writer.
 ///
 /// Uses `try_send` - data is dropped if channel is full.
-/// Data is buffered and flushed when buffer reaches 500 items or 1 second elapsed.
 #[derive(Clone)]
 pub struct StorageWriter {
-    tx: SyncSender<Command>,
+    tx: Sender<Command>,
     dropped_metrics: Arc<AtomicU64>,
 }
 
@@ -140,7 +138,7 @@ impl std::fmt::Debug for StorageWriter {
 }
 
 impl StorageWriter {
-    pub(crate) fn new(tx: SyncSender<Command>) -> Self {
+    pub(crate) fn new(tx: Sender<Command>) -> Self {
         Self {
             tx,
             dropped_metrics: Arc::new(AtomicU64::new(0)),
@@ -152,16 +150,20 @@ impl StorageWriter {
         self.dropped_metrics.load(Ordering::Relaxed)
     }
 
-    /// Upsert a metric series. Buffered until flush threshold.
+    /// Upsert a metric series.
     pub fn upsert_metric_series(&self, series: MetricSeries) -> Result<(), StorageError> {
-        if self.tx.send(Command::UpsertMetricSeries(series)).is_err() {
+        if self
+            .tx
+            .try_send(Command::UpsertMetricSeries(series))
+            .is_err()
+        {
             self.dropped_metrics.fetch_add(1, Ordering::Relaxed);
             return Err(StorageError::ChannelSend);
         }
         Ok(())
     }
 
-    /// Insert a metric value. Buffered until flush threshold.
+    /// Insert a metric value.
     pub fn insert_metric_value(&self, value: MetricValue) -> Result<(), StorageError> {
         if self.tx.try_send(Command::InsertMetricValue(value)).is_err() {
             tracing::warn!("Channel full, dropping metric value");
@@ -171,7 +173,7 @@ impl StorageWriter {
         Ok(())
     }
 
-    /// Insert a single event. Buffered until flush threshold.
+    /// Insert a single event.
     pub fn insert_event(&self, event: Event) -> Result<(), StorageError> {
         self.tx.try_send(Command::InsertEvent(event)).map_err(|_| {
             tracing::warn!("Channel full, dropping event");
@@ -194,7 +196,7 @@ impl StorageWriter {
 /// Metric reader (series + values JOIN).
 #[derive(Clone)]
 pub struct MetricReader {
-    pool: Arc<ReadPool>,
+    pool: Arc<SqlitePool>,
 }
 
 impl std::fmt::Debug for MetricReader {
@@ -204,13 +206,12 @@ impl std::fmt::Debug for MetricReader {
 }
 
 impl MetricReader {
-    pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
+    pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
     }
 
     /// Query metrics with filters.
-    pub fn query(&self, q: MetricQuery) -> Result<Vec<MetricResult>, StorageError> {
-        let conn = self.pool.get()?;
+    pub async fn query(&self, q: MetricQuery) -> Result<Vec<MetricResult>, StorageError> {
         let now = Utc::now();
         let start = q
             .start
@@ -219,95 +220,93 @@ impl MetricReader {
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
         let order = q.order.unwrap_or_default();
 
+        // Build dynamic query
         let mut sql = String::from(
-            "SELECT s.series_id, s.category::VARCHAR, s.name, s.target, s.static_tags, s.description,
+            "SELECT s.series_id, s.category, s.name, s.target, s.static_tags, s.description,
                     v.ts, v.value, v.unit, v.success, v.duration_ms, v.dynamic_tags
              FROM metric_values v
              JOIN metric_series s ON v.series_id = s.series_id
              WHERE v.ts >= ? AND v.ts <= ?",
         );
-        let mut params: Vec<Box<dyn duckdb::ToSql>> = vec![
-            Box::new(start.timestamp_micros()),
-            Box::new(end.timestamp_micros()),
-        ];
 
-        if let Some(cat) = q.category {
+        if q.category.is_some() {
             sql.push_str(" AND s.category = ?");
-            params.push(Box::new(cat.as_ref().to_string()));
         }
-        if let Some(ref name) = q.name {
+        if q.name.is_some() {
             sql.push_str(" AND s.name = ?");
-            params.push(Box::new(name.clone()));
         }
-        if let Some(ref target) = q.target {
+        if q.target.is_some() {
             sql.push_str(" AND s.target = ?");
-            params.push(Box::new(target.clone()));
         }
 
-        sql.push_str(&format!(
-            " ORDER BY v.ts {} LIMIT {}",
-            order.as_sql(),
-            limit
-        ));
+        // Note: ORDER BY direction must be embedded (ASC/DESC can't be parameterized),
+        // but LIMIT can be safely bound as a parameter
+        sql.push_str(&format!(" ORDER BY v.ts {} LIMIT ?", order.as_sql()));
 
-        let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(MetricResult {
-                series_id: row.get(0)?,
-                category: MetricCategory::from_str(&row.get::<_, String>(1)?)
+        // Build query with bindings
+        let mut query = sqlx::query(&sql)
+            .bind(start.timestamp_micros())
+            .bind(end.timestamp_micros());
+
+        if let Some(cat) = &q.category {
+            query = query.bind(cat.as_ref());
+        }
+        if let Some(name) = &q.name {
+            query = query.bind(name);
+        }
+        if let Some(target) = &q.target {
+            query = query.bind(target);
+        }
+
+        // LIMIT must be bound last to match placeholder order in SQL
+        query = query.bind(limit as i64);
+
+        let rows = query.fetch_all(self.pool.inner()).await?;
+
+        let results: Vec<MetricResult> = rows
+            .into_iter()
+            .map(|row| MetricResult {
+                series_id: row.get::<i64, _>(0) as u64,
+                category: MetricCategory::from_str(row.get::<&str, _>(1))
                     .unwrap_or(MetricCategory::Custom),
-                name: row.get(2)?,
-                target: row.get(3)?,
-                static_tags: parse_map(&row.get::<_, Option<String>>(4)?.unwrap_or_default()),
-                description: row.get(5)?,
-                ts: DateTime::from_timestamp_micros(row.get(6)?).unwrap_or(DateTime::UNIX_EPOCH),
-                value: row.get(7)?,
-                unit: row.get(8)?,
-                success: row.get(9)?,
-                duration_ms: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
-                dynamic_tags: parse_map(&row.get::<_, Option<String>>(11)?.unwrap_or_default()),
+                name: row.get(2),
+                target: row.get(3),
+                static_tags: parse_map(row.get::<Option<&str>, _>(4).unwrap_or("{}")),
+                description: row.get(5),
+                ts: DateTime::from_timestamp_micros(row.get(6)).unwrap_or(DateTime::UNIX_EPOCH),
+                value: row.get(7),
+                unit: row.get(8),
+                success: row.get::<i32, _>(9) != 0,
+                duration_ms: row.get::<Option<i64>, _>(10).unwrap_or(0) as u32,
+                dynamic_tags: parse_map(row.get::<Option<&str>, _>(11).unwrap_or("{}")),
             })
-        })?;
+            .collect();
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
+        Ok(results)
     }
 
     /// Get aggregated statistics grouped by category and success.
-    pub fn stats(
+    pub async fn stats(
         &self,
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
     ) -> Result<MetricStats, StorageError> {
-        let conn = self.pool.get()?;
         let now = Utc::now();
         let start_ts = start.unwrap_or_else(|| now - Duration::days(DEFAULT_RANGE_DAYS));
         let end_ts = end.unwrap_or(now);
 
-        let sql = "SELECT s.category::VARCHAR, v.success, COUNT(*) as cnt
+        let sql = "SELECT s.category, v.success, COUNT(*) as cnt
                    FROM metric_values v
                    JOIN metric_series s ON v.series_id = s.series_id
                    WHERE v.ts >= ? AND v.ts <= ?
                    GROUP BY s.category, v.success
                    ORDER BY s.category";
 
-        let mut stmt = conn.prepare(sql)?;
-        let params: [&dyn duckdb::ToSql; 2] =
-            [&start_ts.timestamp_micros(), &end_ts.timestamp_micros()];
-
-        // Collect raw rows: (category, success, count)
-        let mut raw_rows: Vec<(String, bool, u64)> = Vec::new();
-        let rows = stmt.query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, i64>(2)? as u64,
-            ))
-        })?;
-        for row in rows {
-            raw_rows.push(row?);
-        }
+        let rows = sqlx::query(sql)
+            .bind(start_ts.timestamp_micros())
+            .bind(end_ts.timestamp_micros())
+            .fetch_all(self.pool.inner())
+            .await?;
 
         // Aggregate into CategoryStats
         let mut category_map: HashMap<String, CategoryStats> = HashMap::new();
@@ -315,9 +314,14 @@ impl MetricReader {
         let mut success_count = 0u64;
         let mut failure_count = 0u64;
 
-        for (cat, success, cnt) in raw_rows {
+        for row in rows {
+            let cat: String = row.get(0);
+            let success: i32 = row.get(1);
+            let cnt: i64 = row.get(2);
+            let cnt = cnt as u64;
+
             total += cnt;
-            if success {
+            if success != 0 {
                 success_count += cnt;
             } else {
                 failure_count += cnt;
@@ -330,7 +334,7 @@ impl MetricReader {
                 failure: 0,
             });
             entry.total += cnt;
-            if success {
+            if success != 0 {
                 entry.success += cnt;
             } else {
                 entry.failure += cnt;
@@ -352,7 +356,7 @@ impl MetricReader {
 /// Event reader.
 #[derive(Clone)]
 pub struct EventReader {
-    pool: Arc<ReadPool>,
+    pool: Arc<SqlitePool>,
 }
 
 impl std::fmt::Debug for EventReader {
@@ -362,13 +366,12 @@ impl std::fmt::Debug for EventReader {
 }
 
 impl EventReader {
-    pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
+    pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
     }
 
     /// Query events with filters.
-    pub fn query(&self, q: EventQuery) -> Result<Vec<Event>, StorageError> {
-        let conn = self.pool.get()?;
+    pub async fn query(&self, q: EventQuery) -> Result<Vec<Event>, StorageError> {
         let now = Utc::now();
         let start = q
             .start
@@ -378,185 +381,55 @@ impl EventReader {
         let order = q.order.unwrap_or_default();
 
         let mut sql = String::from(
-            "SELECT id, ts, source::VARCHAR, kind::VARCHAR, severity::VARCHAR, message, payload
+            "SELECT id, ts, source, kind, severity, message, payload
              FROM events WHERE ts >= ? AND ts <= ?",
         );
-        let mut params: Vec<Box<dyn duckdb::ToSql>> = vec![
-            Box::new(start.timestamp_micros()),
-            Box::new(end.timestamp_micros()),
-        ];
 
-        if let Some(src) = q.source {
+        if q.source.is_some() {
             sql.push_str(" AND source = ?");
-            params.push(Box::new(src.as_ref().to_string()));
         }
-        if let Some(kind) = q.kind {
+        if q.kind.is_some() {
             sql.push_str(" AND kind = ?");
-            params.push(Box::new(kind.as_ref().to_string()));
         }
-        if let Some(sev) = q.severity {
+        if q.severity.is_some() {
             sql.push_str(" AND severity = ?");
-            params.push(Box::new(sev.as_ref().to_string()));
         }
 
-        sql.push_str(&format!(" ORDER BY ts {} LIMIT {}", order.as_sql(), limit));
+        // Note: ORDER BY direction must be embedded, but LIMIT is parameterized
+        sql.push_str(&format!(" ORDER BY ts {} LIMIT ?", order.as_sql()));
 
-        let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(Event {
-                id: row.get(0)?,
-                ts: DateTime::from_timestamp_micros(row.get(1)?).unwrap_or(DateTime::UNIX_EPOCH),
-                source: EventSource::from_str(&row.get::<_, String>(2)?)
-                    .unwrap_or(EventSource::System),
-                kind: EventKind::from_str(&row.get::<_, String>(3)?).unwrap_or(EventKind::System),
-                severity: EventSeverity::from_str(&row.get::<_, String>(4)?)
+        let mut query = sqlx::query(&sql)
+            .bind(start.timestamp_micros())
+            .bind(end.timestamp_micros());
+
+        if let Some(src) = &q.source {
+            query = query.bind(src.as_ref());
+        }
+        if let Some(kind) = &q.kind {
+            query = query.bind(kind.as_ref());
+        }
+        if let Some(sev) = &q.severity {
+            query = query.bind(sev.as_ref());
+        }
+
+        // LIMIT must be bound last to match placeholder order in SQL
+        query = query.bind(limit as i64);
+
+        let rows = query.fetch_all(self.pool.inner()).await?;
+
+        let results: Vec<Event> = rows
+            .into_iter()
+            .map(|row| Event {
+                id: Some(row.get::<i64, _>(0)),
+                ts: DateTime::from_timestamp_micros(row.get(1)).unwrap_or(DateTime::UNIX_EPOCH),
+                source: EventSource::from_str(row.get::<&str, _>(2)).unwrap_or(EventSource::System),
+                kind: EventKind::from_str(row.get::<&str, _>(3)).unwrap_or(EventKind::System),
+                severity: EventSeverity::from_str(row.get::<&str, _>(4))
                     .unwrap_or(EventSeverity::Info),
-                message: row.get(5)?,
-                payload: parse_map(&row.get::<_, Option<String>>(6)?.unwrap_or_default()),
+                message: row.get(5),
+                payload: parse_map(row.get::<Option<&str>, _>(6).unwrap_or("{}")),
             })
-        })?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
-}
-
-/// Raw SQL reader (SELECT only).
-#[derive(Clone)]
-pub struct RawSqlReader {
-    pool: Arc<ReadPool>,
-}
-
-impl std::fmt::Debug for RawSqlReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawSqlReader").finish_non_exhaustive()
-    }
-}
-
-/// Forbidden SQL keywords that could modify data or schema.
-const FORBIDDEN_SQL_KEYWORDS: &[&str] = &[
-    "delete",
-    "update",
-    "insert",
-    "drop",
-    "alter",
-    "create",
-    "truncate",
-    "replace",
-    "merge",
-    "grant",
-    "revoke",
-    "commit",
-    "rollback",
-    "savepoint",
-    "lock",
-    "unlock",
-    "call",
-    "execute",
-    "exec",
-    "attach",
-    "detach",
-    "vacuum",
-    "analyze",
-    "pragma",
-    "copy",
-    "load",
-    "export",
-];
-
-/// Validate SQL query for safety.
-fn validate_sql_safety(sql: &str) -> Result<(), StorageError> {
-    static SQL_VALIDATOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-
-    let validator = SQL_VALIDATOR.get_or_init(|| {
-        let pattern = FORBIDDEN_SQL_KEYWORDS.join("|");
-        // Case-insensitive, word boundaries around the set of keywords
-        regex::Regex::new(&format!(r"(?i)\b({})\b", pattern))
-            .expect("failed to compile SQL validation regex")
-    });
-
-    if validator.is_match(sql) {
-        return Err(StorageError::InvalidData(
-            "forbidden SQL keyword found".to_string(),
-        ));
-    }
-
-    // Check for SQL comments that could hide malicious code
-    // We check this separately as the regex above handles keywords
-    if sql.contains("--") || sql.contains("/*") {
-        return Err(StorageError::InvalidData(
-            "SQL comments not allowed".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-impl RawSqlReader {
-    pub(crate) fn new(pool: Arc<ReadPool>) -> Self {
-        Self { pool }
-    }
-
-    /// Execute raw SELECT query.
-    ///
-    /// # Security
-    ///
-    /// This method performs strict validation to prevent SQL injection:
-    /// - Only SELECT statements are allowed
-    /// - Multiple statements are rejected
-    /// - Dangerous keywords (DELETE, UPDATE, DROP, etc.) are blocked
-    /// - SQL comments are not allowed
-    pub fn execute(&self, sql: &str) -> Result<Vec<HashMap<String, Value>>, StorageError> {
-        let trimmed = sql.trim().trim_end_matches(';');
-        if !trimmed.to_ascii_lowercase().starts_with("select") {
-            return Err(StorageError::InvalidData("only SELECT allowed".to_string()));
-        }
-        if trimmed.contains(';') {
-            return Err(StorageError::InvalidData(
-                "multiple statements not allowed".to_string(),
-            ));
-        }
-
-        // Additional security validation
-        validate_sql_safety(trimmed)?;
-
-        let conn = self.pool.get()?;
-        let describe = format!("DESCRIBE SELECT * FROM ({trimmed}) AS _q");
-        let cols: Vec<String> = {
-            let mut stmt = conn.prepare(&describe)?;
-            let mut rows = stmt.query([])?;
-            let mut names = Vec::new();
-            while let Some(row) = rows.next()? {
-                names.push(row.get(0)?);
-            }
-            names
-        };
-
-        let mut stmt = conn.prepare(trimmed)?;
-        let mut rows = stmt.query([])?;
-        let mut results = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            let mut map = HashMap::new();
-            for (i, name) in cols.iter().enumerate() {
-                let val = if let Ok(v) = row.get::<_, i64>(i) {
-                    Value::Number(v.into())
-                } else if let Ok(v) = row.get::<_, f64>(i) {
-                    serde_json::Number::from_f64(v)
-                        .map(Value::Number)
-                        .unwrap_or(Value::Null)
-                } else if let Ok(v) = row.get::<_, String>(i) {
-                    Value::String(v)
-                } else if let Ok(v) = row.get::<_, bool>(i) {
-                    Value::Bool(v)
-                } else {
-                    Value::Null
-                };
-                map.insert(name.clone(), val);
-            }
-            results.push(map);
-        }
+            .collect();
 
         Ok(results)
     }
@@ -569,7 +442,7 @@ impl RawSqlReader {
 /// Storage administration.
 #[derive(Clone)]
 pub struct StorageAdmin {
-    tx: SyncSender<Command>,
+    tx: Sender<Command>,
 }
 
 impl std::fmt::Debug for StorageAdmin {
@@ -579,7 +452,7 @@ impl std::fmt::Debug for StorageAdmin {
 }
 
 impl StorageAdmin {
-    pub(crate) fn new(tx: SyncSender<Command>) -> Self {
+    pub(crate) fn new(tx: Sender<Command>) -> Self {
         Self { tx }
     }
 
@@ -592,12 +465,6 @@ impl StorageAdmin {
     pub fn cleanup_events(&self, retention_days: u32) -> Result<(), StorageError> {
         self.tx
             .try_send(Command::CleanupEvents { retention_days })
-            .map_err(|_| StorageError::ChannelSend)
-    }
-
-    pub fn checkpoint(&self) -> Result<(), StorageError> {
-        self.tx
-            .try_send(Command::Checkpoint)
             .map_err(|_| StorageError::ChannelSend)
     }
 
@@ -627,22 +494,19 @@ fn parse_map(s: &str) -> std::collections::BTreeMap<String, String> {
 mod tests {
     use super::*;
     use crate::storage::actor::DbActor;
-    use duckdb::Connection;
-    use tempfile::tempdir;
+    use std::time::Duration;
 
-    #[test]
-    fn test_metric_roundtrip() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let (handle, tx, _reader_conn) = DbActor::spawn(
-            &db_path,
+    #[tokio::test]
+    async fn test_metric_roundtrip() {
+        let (handle, tx, pool) = DbActor::spawn(
+            "sqlite::memory:",
             100,
-            std::time::Duration::from_secs(1),
             crate::storage::actor::DEFAULT_BATCH_SIZE,
             crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
         )
+        .await
         .unwrap();
+
         let writer = StorageWriter::new(tx.clone());
         let admin = StorageAdmin::new(tx);
 
@@ -657,197 +521,117 @@ mod tests {
 
         writer.upsert_metric_series(series).unwrap();
         writer.insert_metric_value(value).unwrap();
-        admin.checkpoint().unwrap();
-        admin.shutdown().unwrap();
-        handle.join().unwrap();
+        writer.flush().unwrap();
 
-        // After shutdown, open a new connection to read data
-        let conn = Connection::open(&db_path).unwrap();
-        let pool = ReadPool::new(conn);
+        // Give actor time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        admin.shutdown().unwrap();
+        handle.await.unwrap();
+
         let reader = MetricReader::new(pool);
-        let results = reader.query(MetricQuery::default()).unwrap();
+        let results = reader.query(MetricQuery::default()).await.unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "latency");
         assert_eq!(results[0].value, 42.5);
     }
 
-    #[test]
-    fn test_event_roundtrip() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("event.db");
+    #[tokio::test]
+    async fn test_event_roundtrip() {
+        let (handle, tx, pool) = DbActor::spawn(
+            "sqlite::memory:",
+            100,
+            crate::storage::actor::DEFAULT_BATCH_SIZE,
+            crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .await
+        .unwrap();
 
-        {
-            let (handle, tx, _reader_conn) = DbActor::spawn(
-                &db_path,
-                100,
-                std::time::Duration::from_secs(1),
-                crate::storage::actor::DEFAULT_BATCH_SIZE,
-                crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
-            )
-            .unwrap();
-            let writer = StorageWriter::new(tx.clone());
-            let admin = StorageAdmin::new(tx);
+        let writer = StorageWriter::new(tx.clone());
+        let admin = StorageAdmin::new(tx);
 
-            let event = Event::new(
-                EventSource::System,
-                EventKind::System,
-                EventSeverity::Info,
-                "Started",
-            )
-            .with_payload("version", "1.0.0");
+        let event = Event::new(
+            EventSource::System,
+            EventKind::System,
+            EventSeverity::Info,
+            "Started",
+        )
+        .with_payload("version", "1.0.0");
 
-            writer.insert_event(event).unwrap();
-            admin.checkpoint().unwrap();
-            admin.shutdown().unwrap();
-            handle.join().unwrap();
-        }
+        writer.insert_event(event).unwrap();
 
-        // After shutdown, open a new connection to read data
-        let conn = Connection::open(&db_path).unwrap();
-        let pool = ReadPool::new(conn);
+        // Give actor time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        admin.shutdown().unwrap();
+        handle.await.unwrap();
+
         let reader = EventReader::new(pool);
-        let results = reader.query(EventQuery::default()).unwrap();
+        let results = reader.query(EventQuery::default()).await.unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source, EventSource::System);
         assert_eq!(results[0].message, "Started");
     }
 
-    #[test]
-    fn test_query_filters() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("filter.db");
+    #[tokio::test]
+    async fn test_query_filters() {
+        let (handle, tx, pool) = DbActor::spawn(
+            "sqlite::memory:",
+            100,
+            crate::storage::actor::DEFAULT_BATCH_SIZE,
+            crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+        )
+        .await
+        .unwrap();
 
-        {
-            let (handle, tx, _reader_conn) = DbActor::spawn(
-                &db_path,
-                100,
-                std::time::Duration::from_secs(1),
-                crate::storage::actor::DEFAULT_BATCH_SIZE,
-                crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
+        let writer = StorageWriter::new(tx.clone());
+        let admin = StorageAdmin::new(tx);
+
+        let tcp = MetricSeries::new(
+            MetricCategory::NetworkTcp,
+            "latency",
+            "host1",
+            StaticTags::new(),
+            None,
+        );
+        let crypto = MetricSeries::new(
+            MetricCategory::Crypto,
+            "price",
+            "BTC",
+            StaticTags::new(),
+            None,
+        );
+
+        writer.upsert_metric_series(tcp.clone()).unwrap();
+        writer
+            .insert_metric_value(MetricValue::new(tcp.series_id, 10.0, true).with_duration_ms(5))
+            .unwrap();
+        writer.upsert_metric_series(crypto.clone()).unwrap();
+        writer
+            .insert_metric_value(
+                MetricValue::new(crypto.series_id, 100000.0, true).with_duration_ms(50),
             )
             .unwrap();
-            let writer = StorageWriter::new(tx.clone());
-            let admin = StorageAdmin::new(tx);
+        writer.flush().unwrap();
 
-            let tcp = MetricSeries::new(
-                MetricCategory::NetworkTcp,
-                "latency",
-                "host1",
-                StaticTags::new(),
-                None,
-            );
-            let crypto = MetricSeries::new(
-                MetricCategory::Crypto,
-                "price",
-                "BTC",
-                StaticTags::new(),
-                None,
-            );
+        // Give actor time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-            writer.upsert_metric_series(tcp.clone()).unwrap();
-            writer
-                .insert_metric_value(
-                    MetricValue::new(tcp.series_id, 10.0, true).with_duration_ms(5),
-                )
-                .unwrap();
-            writer.upsert_metric_series(crypto.clone()).unwrap();
-            writer
-                .insert_metric_value(
-                    MetricValue::new(crypto.series_id, 100000.0, true).with_duration_ms(50),
-                )
-                .unwrap();
+        admin.shutdown().unwrap();
+        handle.await.unwrap();
 
-            admin.checkpoint().unwrap();
-            admin.shutdown().unwrap();
-            handle.join().unwrap();
-        }
-
-        // After shutdown, open a new connection to read data
-        let conn = Connection::open(&db_path).unwrap();
-        let pool = ReadPool::new(conn);
         let reader = MetricReader::new(pool);
-
         let results = reader
             .query(MetricQuery {
                 category: Some(MetricCategory::NetworkTcp),
                 ..Default::default()
             })
+            .await
             .unwrap();
+
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "latency");
-    }
-
-    #[test]
-    fn test_dropped_metrics_counter_api() {
-        // Test that dropped_metrics counter API works correctly.
-        // Note: Reliably testing channel-full behavior requires mocking the sender,
-        // which is beyond the scope of this unit test. We verify the counter starts
-        // at 0 and the Clone trait shares the counter across instances.
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("dropped.db");
-
-        let (handle, tx, _reader_conn) = DbActor::spawn(
-            &db_path,
-            100,
-            std::time::Duration::from_secs(1),
-            crate::storage::actor::DEFAULT_BATCH_SIZE,
-            crate::storage::actor::DEFAULT_BATCH_FLUSH_INTERVAL,
-        )
-        .unwrap();
-        let writer = StorageWriter::new(tx.clone());
-        let writer_clone = writer.clone();
-
-        // Counter starts at 0
-        assert_eq!(writer.dropped_metrics(), 0);
-        assert_eq!(writer_clone.dropped_metrics(), 0);
-
-        // Insert a metric successfully
-        let series = MetricSeries::new(
-            MetricCategory::Custom,
-            "test",
-            "target",
-            StaticTags::new(),
-            None,
-        );
-        writer.upsert_metric_series(series).unwrap();
-
-        // Counter still 0 after successful insert
-        assert_eq!(writer.dropped_metrics(), 0);
-        // Cloned writer shares the same counter
-        assert_eq!(writer_clone.dropped_metrics(), 0);
-
-        tx.send(Command::Shutdown).unwrap();
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn test_validate_sql_safety_allows_select() {
-        assert!(super::validate_sql_safety("SELECT * FROM metrics").is_ok());
-        assert!(super::validate_sql_safety("select name, value from metrics where id = 1").is_ok());
-    }
-
-    #[test]
-    fn test_validate_sql_safety_blocks_forbidden_keywords() {
-        assert!(super::validate_sql_safety("DELETE FROM metrics").is_err());
-        assert!(super::validate_sql_safety("select * from metrics; drop table metrics").is_err());
-        assert!(super::validate_sql_safety("UPDATE metrics SET value = 0").is_err());
-        assert!(super::validate_sql_safety("INSERT INTO metrics VALUES (1)").is_err());
-        assert!(super::validate_sql_safety("SELECT * FROM metrics WHERE truncate = 1").is_err());
-    }
-
-    #[test]
-    fn test_validate_sql_safety_blocks_comments() {
-        assert!(super::validate_sql_safety("SELECT * FROM metrics -- comment").is_err());
-        assert!(super::validate_sql_safety("SELECT /* hidden */ * FROM metrics").is_err());
-    }
-
-    #[test]
-    fn test_validate_sql_safety_keyword_word_boundary() {
-        // "updated_at" contains "update" but should be allowed (not a standalone keyword)
-        assert!(super::validate_sql_safety("SELECT updated_at FROM metrics").is_ok());
-        // "executor" contains "exec" but should be allowed
-        assert!(super::validate_sql_safety("SELECT executor FROM jobs").is_ok());
     }
 }

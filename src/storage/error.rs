@@ -8,9 +8,9 @@ use thiserror::Error;
 /// Errors that can occur in the storage layer.
 #[derive(Debug, Error)]
 pub enum StorageError {
-    /// Database operation failed.
+    /// Database operation failed (sqlx error).
     #[error("database error: {0}")]
-    Database(#[from] duckdb::Error),
+    Database(#[from] sqlx::Error),
 
     /// Failed to send command to writer actor.
     #[error("failed to send command to writer actor")]
@@ -27,4 +27,8 @@ pub enum StorageError {
     /// Invalid data in database (e.g., unknown enum value).
     #[error("invalid data: {0}")]
     InvalidData(String),
+
+    /// Migration error.
+    #[error("migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
 }

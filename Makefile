@@ -22,7 +22,7 @@ TAILWIND_CONTENT := "templates/**/*.html src/**/*.rs"
 # =============================================================================
 
 ## Primary Targets
-all: fmt lint check test doc build    ## Run full CI pipeline
+all: fmt lint check test-all doc build    ## Run full CI pipeline
 
 ## Code Quality
 fmt:                                  ## Format code with rustfmt
@@ -47,8 +47,16 @@ check:                                ## Type-check without building
 # Testing
 # =============================================================================
 
-test:                                 ## Run all tests
-	@echo "Running tests..."
+test:                                 ## Run unit tests
+	@echo "Running unit tests..."
+	@$(CARGO) test $(CARGO_FLAGS) --lib --bins
+
+test-integration:                     ## Run integration tests
+	@echo "Running integration tests..."
+	@$(CARGO) test $(CARGO_FLAGS) --test '*'
+
+test-all:                             ## Run all tests (unit + integration + doc)
+	@echo "Running all tests..."
 	@$(CARGO) test $(CARGO_FLAGS) --all-targets --all-features
 
 # =============================================================================

@@ -9,6 +9,7 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 oculus = { git = "https://github.com/telepair/oculus.git" }
+tokio = { version = "1", features = ["full"] }
 chrono = "0.4"
 ```
 
@@ -17,15 +18,16 @@ chrono = "0.4"
 ```rust
 use oculus::{
     StorageBuilder, MetricCategory, MetricSeries, MetricValue, StaticTags,
-    MetricQuery, EventQuery,
+    MetricQuery,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Build storage (spawns writer actor thread)
-    let handles = StorageBuilder::new("./data.db")
-        .pool_size(4)           // Read connection pool size
-        .channel_capacity(1024) // Writer command queue size
-        .build()?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build storage (spawns writer actor)
+    let handles = StorageBuilder::new("sqlite:data/oculus.db?mode=rwc")
+        .channel_capacity(1024)  // Writer command queue size
+        .build()
+        .await?;
 
     // Create a metric series (dimension data)
     let series = MetricSeries::new(
@@ -42,22 +44,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let value = MetricValue::new(series_id, 42.0, true);
     handles.writer.insert_metric_value(value)?;
 
-    // Force WAL checkpoint for immediate read visibility
-    handles.admin.checkpoint()?;
+    // Flush to ensure data is written
+    handles.writer.flush()?;
+
+    // Wait for actor to process
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Query via reader facade
-    let results = handles.metric_reader.query(MetricQuery::default())?;
+    let results = handles.metric_reader.query(MetricQuery::default()).await?;
     println!("Found {} metrics", results.len());
 
     // Graceful shutdown
-    handles.shutdown()?;
+    handles.shutdown().await?;
     Ok(())
 }
 ```
 
 ## API Overview
 
-### Writer (MPSC Channel → Single Writer Thread)
+### Writer (MPSC Channel → Single Writer Task)
 
 | Facade          | Methods                  | Description                                 |
 | --------------- | ------------------------ | ------------------------------------------- |
@@ -67,11 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 |                 | `flush()`                | Force flush buffered data                   |
 |                 | `dropped_metrics()`      | Get count of dropped metrics                |
 
-### Readers (try_clone() Connection Pool)
+### Readers (Connection Pool)
 
 | Facade         | Methods              | Description                          |
 | -------------- | -------------------- | ------------------------------------ |
 | `MetricReader` | `query(MetricQuery)` | Query metrics (series + values JOIN) |
+|                | `stats(start, end)`  | Get aggregated statistics            |
 | `EventReader`  | `query(EventQuery)`  | Query events with filters            |
 | `RawSqlReader` | `execute(sql)`       | Execute raw SELECT queries           |
 
@@ -81,7 +87,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | -------------- | ------------------------- | ------------------------ |
 | `StorageAdmin` | `cleanup_metric_values()` | Delete old metric values |
 |                | `cleanup_events()`        | Delete old events        |
-|                | `checkpoint()`            | Force WAL checkpoint     |
 |                | `shutdown()`              | Graceful shutdown        |
 
 ## Data Types
@@ -142,7 +147,7 @@ let results = handles.metric_reader.query(MetricQuery {
     limit: Some(50),
     order: Some(SortOrder::Desc),
     ..Default::default()
-})?;
+}).await?;
 
 // Raw SQL query
 let rows = handles.raw_sql_reader.execute(
@@ -150,7 +155,7 @@ let rows = handles.raw_sql_reader.execute(
      FROM metric_values v
      JOIN metric_series s ON v.series_id = s.series_id
      GROUP BY s.name"
-)?;
+).await?;
 ```
 
 ## Error Handling
@@ -163,7 +168,7 @@ use oculus::StorageError;
 match handles.writer.insert_metric_value(value) {
     Ok(()) => println!("Inserted"),
     Err(StorageError::ChannelSend) => eprintln!("Channel full or closed"),
-    Err(StorageError::Database(e)) => eprintln!("DuckDB error: {e}"),
+    Err(StorageError::Database(e)) => eprintln!("SQLite error: {e}"),
     Err(e) => eprintln!("Other error: {e}"),
 }
 ```
@@ -174,18 +179,17 @@ match handles.writer.insert_metric_value(value) {
 ┌──────────────────┐     MPSC Channel     ┌──────────────────┐
 │  StorageWriter   │ ──────────────────►  │    DbActor       │
 │  StorageAdmin    │                      │  (Single Writer) │
-│                  │                      │  + Appender      │
+│                  │                      │                  │
 └──────────────────┘                      └────────┬─────────┘
                                                    │
                                                    ▼
-┌──────────────────┐   try_clone() Pool   ┌──────────────────┐
-│  MetricReader    │ ◀─────────────────   │    DuckDB        │
-│  EventReader     │                      │    (File)        │
+┌──────────────────┐     Connection Pool  ┌──────────────────┐
+│  MetricReader    │ ◀─────────────────   │     SQLite       │
+│  EventReader     │                      │     (File)       │
 │  RawSqlReader    │                      │                  │
 └──────────────────┘                      └──────────────────┘
 ```
 
-- **Write path**: Commands sent via sync MPSC to dedicated writer thread (uses DuckDB Appender for high throughput)
-- **Read path**: try_clone() connection pool for concurrent reads
+- **Write path**: Commands sent via async MPSC to dedicated writer task
+- **Read path**: Connection pool for concurrent reads
 - **Batching**: `MetricValue` inserts are buffered (500 items or 1 second)
-- **Visibility**: Call `checkpoint()` after writes to ensure read visibility (DuckDB WAL)

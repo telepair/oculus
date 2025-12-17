@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::collector::http::HttpConfig;
 use crate::collector::ping::PingConfig;
 use crate::collector::tcp::TcpConfig;
+use crate::storage::{CollectorRecord, CollectorType};
 
 use super::validation::ConfigError;
 
@@ -112,13 +113,13 @@ impl CollectorsConfig {
         let dir = Path::new(dir_path);
         if !dir.exists() {
             return Err(ConfigError::ValidationError(format!(
-                "collector_path '{}' does not exist",
+                "collector include path '{}' does not exist",
                 dir_path
             )));
         }
         if !dir.is_dir() {
             return Err(ConfigError::ValidationError(format!(
-                "collector_path '{}' is not a directory",
+                "collector include path '{}' is not a directory",
                 dir_path
             )));
         }
@@ -149,6 +150,46 @@ impl CollectorsConfig {
         }
 
         Ok(merged)
+    }
+
+    /// Convert to CollectorRecords for database sync.
+    pub fn to_collector_records(&self) -> Vec<CollectorRecord> {
+        let mut records = Vec::new();
+
+        for tcp in &self.tcp {
+            let config_json = serde_json::to_value(tcp).unwrap_or_default();
+            records.push(CollectorRecord::from_config(
+                CollectorType::Tcp,
+                &tcp.name,
+                tcp.enabled,
+                &tcp.group,
+                config_json,
+            ));
+        }
+
+        for ping in &self.ping {
+            let config_json = serde_json::to_value(ping).unwrap_or_default();
+            records.push(CollectorRecord::from_config(
+                CollectorType::Ping,
+                &ping.name,
+                ping.enabled,
+                &ping.group,
+                config_json,
+            ));
+        }
+
+        for http in &self.http {
+            let config_json = serde_json::to_value(http).unwrap_or_default();
+            records.push(CollectorRecord::from_config(
+                CollectorType::Http,
+                &http.name,
+                http.enabled,
+                &http.group,
+                config_json,
+            ));
+        }
+
+        records
     }
 }
 
@@ -334,5 +375,21 @@ headers:
             config.headers.get("Authorization"),
             Some(&"Bearer token".to_string())
         );
+    }
+
+    #[test]
+    fn test_to_collector_records() {
+        let config = CollectorsConfig {
+            tcp: vec![TcpConfig::new("tcp-1", "127.0.0.1", 6379)],
+            ping: vec![PingConfig::new("ping-1", "8.8.8.8")],
+            http: vec![],
+        };
+
+        let records = config.to_collector_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].name, "tcp-1");
+        assert_eq!(records[0].collector_type, CollectorType::Tcp);
+        assert_eq!(records[1].name, "ping-1");
+        assert_eq!(records[1].collector_type, CollectorType::Ping);
     }
 }

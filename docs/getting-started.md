@@ -37,111 +37,73 @@ OCULUS_SERVER_PORT=9090 OCULUS_DB_PATH=/data/oculus.db ./target/release/oculus
 
 ### CLI Options
 
-| Option           | Env Variable          | Default               | Description             |
-| ---------------- | --------------------- | --------------------- | ----------------------- |
-| `-c, --config`   | `OCULUS_CONFIG`       | `configs/config.yaml` | Config file path        |
-| `--server-bind`  | `OCULUS_SERVER_BIND`  | `0.0.0.0`             | Server bind address     |
-| `--server-port`  | `OCULUS_SERVER_PORT`  | `8080`                | Server port             |
-| `--db-path`      | `OCULUS_DB_PATH`      | `data/oculus.db`      | Database path           |
-| `--db-pool-size` | `OCULUS_DB_POOL_SIZE` | `4`                   | DB connection pool size |
+| Option          | Env Variable         | Default               | Description         |
+| --------------- | -------------------- | --------------------- | ------------------- |
+| `-c, --config`  | `OCULUS_CONFIG`      | `configs/config.yaml` | Config file path    |
+| `--server-bind` | `OCULUS_SERVER_BIND` | `0.0.0.0`             | Server bind address |
+| `--server-port` | `OCULUS_SERVER_PORT` | `8080`                | Server port         |
+| `--db-path`     | `OCULUS_DB_PATH`     | `data/oculus.db`      | Database path       |
 
 **Priority**: CLI > Environment > Config File
 
 ## Configuration
 
+Oculus uses a main config file and a directory of collector configs:
+
 ```yaml
-# configs/config.yaml
+# configs/config.example.yaml
 server:
   bind: 0.0.0.0
   port: 8080
 
 database:
-  path: data/oculus.db
-  pool_size: 4
-  channel_capacity: 1000
+  driver: sqlite
+  dsn: data/oculus.db
+  channel_capacity: 10000
 
-collectors:
-  # Crypto price collector
-  - type: crypto
-    asset: btc_usd
-    source: coingecko
-    interval: 60s
+# Path to directory with collector config files
+collector_include: configs/collectors/
+```
 
-  # Stock price collector
-  - type: stock
-    symbol: TSLA
-    source: yahoo
-    interval: 5m
+### Collector Configuration
 
-  # Polymarket collector
-  - type: polymarket
-    market_id: us-election-2024
-    interval: 30s
+Collectors are defined in separate YAML files under `configs/collectors/`:
 
-  # Network probes (HTTP, TCP, Ping)
-  - type: network.http
-    name: api-health
-    target: https://api.example.com/health
-    interval: 30s
+```yaml
+# configs/collectors/tcp.yaml
+tcp:
+  - name: google-dns
+    host: 8.8.8.8
+    port: 53
+    enabled: true
+    group: production
+    interval: 5s
     timeout: 5s
+    tags:
+      env: production
 
-  - type: network.tcp
-    name: redis-probe
-    target: 127.0.0.1:6379
+# configs/collectors/ping.yaml
+ping:
+  - name: cloudflare-ping
+    host: 1.1.1.1
+    enabled: true
+    group: production
     interval: 30s
-    timeout: 5s
-
-  - type: network.ping
-    name: gateway-probe
-    target: 8.8.8.8
-    interval: 60s
     timeout: 3s
 
-  # Generic API collector (for any RESTful API)
-  - type: api
-    name: fear_greed_index
-    url: https://api.alternative.me/fng/
+# configs/collectors/http.yaml
+http:
+  - name: api-health
+    url: https://api.example.com/health
+    enabled: true
+    group: production
     method: GET
-    json_path: $.data[0].value
-    interval: 300s
-    tags:
-      source: alternative.me
-
-rules:
-  - name: btc_price_alert
-    condition: "crypto.price.btc_usd > 100000"
-    severity: info
-    message: "BTC crossed $100k!"
-    channels: [telegram, log]
-
-  - name: api_slow_response
-    condition: "network.http.api_health.rtt > 1000"
-    severity: warn
-    message: "API response time exceeds 1s"
-    channels: [slack, webhook]
-    action:
-      type: http_post
-      url: https://automation.example.com/alert
-
-notifications:
-  telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    chat_id: ${TELEGRAM_CHAT_ID}
-
-  webhook:
-    url: https://hooks.example.com/notify
-
-  slack:
-    webhook_url: ${SLACK_WEBHOOK_URL}
-
-  email:
-    smtp_host: smtp.example.com
-    smtp_port: 587
-    smtp_user: ${SMTP_USER}
-    smtp_pass: ${SMTP_PASS}
-    from_address: oculus@example.com
-    to_addresses:
-      - alerts@example.com
+    interval: 30s
+    timeout: 10s
+    headers:
+      Authorization: "Bearer ${API_TOKEN:-default}"
+    success_conditions:
+      status_codes: [200, 201]
 ```
 
 ## Development
@@ -165,6 +127,8 @@ oculus/
 │   ├── dashboard.html
 │   └── static/css/   # Tailwind CSS
 ├── configs/          # Configuration examples
+│   ├── config.example.yaml
+│   └── collectors/   # Collector config files
 ├── docs/             # Documentation
 └── Makefile          # Build automation
 ```

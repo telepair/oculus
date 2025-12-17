@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! - **Collectors**: Data collection from various sources (network, crypto, stock, prediction markets)
-//! - **Storage**: DuckDB-based persistence layer with read/write separation
+//! - **Storage**: SQLite-based persistence layer with async read/write separation
 //! - **Rule Engine**: Simple (YAML) and complex (SQL) rule evaluation
 //! - **Presentation**: Web UI and REST API
 //! - **Notification**: Multi-channel alert delivery
@@ -17,9 +17,10 @@
 //! ```rust,no_run
 //! use oculus::{StorageBuilder, MetricSeries, MetricValue, MetricCategory, StaticTags};
 //!
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Build storage layer
-//!     let handles = StorageBuilder::new("./oculus.db").build()?;
+//!     let handles = StorageBuilder::new("sqlite:oculus.db?mode=rwc").build().await?;
 //!
 //!     // Create and insert a metric
 //!     let series = MetricSeries::new(
@@ -34,10 +35,10 @@
 //!     handles.writer.insert_metric_value(value)?;
 //!
 //!     // Query metrics
-//!     let results = handles.metric_reader.query(Default::default())?;
+//!     let results = handles.metric_reader.query(Default::default()).await?;
 //!     println!("Found {} metrics", results.len());
 //!
-//!     handles.shutdown()?;
+//!     handles.shutdown().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -51,8 +52,8 @@ pub mod storage;
 pub use storage::{
     DynamicTags, Event, EventKind, EventPayload, EventQuery, EventReader, EventSeverity,
     EventSource, MetricCategory, MetricQuery, MetricReader, MetricResult, MetricSeries,
-    MetricValue, RawSqlReader, SortOrder, StaticTags, StorageAdmin, StorageBuilder, StorageError,
-    StorageHandles, StorageWriter,
+    MetricValue, SortOrder, StaticTags, StorageAdmin, StorageBuilder, StorageError, StorageHandles,
+    StorageWriter,
 };
 
 pub use collector::{

@@ -93,8 +93,8 @@ impl TcpConfig {
     }
 
     /// Get static tags as StaticTags type.
-    pub fn static_tags(&self) -> StaticTags {
-        self.tags.clone()
+    pub fn static_tags(&self) -> &StaticTags {
+        &self.tags
     }
 
     /// Set the collection interval.
@@ -151,7 +151,7 @@ impl TcpCollector {
             MetricCategory::NetworkTcp,
             &config.name,
             &target,
-            &config.static_tags(),
+            config.static_tags(),
         );
 
         Self {
@@ -192,7 +192,7 @@ impl Collector for TcpCollector {
             MetricCategory::NetworkTcp,
             self.config.name.clone(),
             target,
-            self.config.static_tags(),
+            self.config.static_tags().clone(),
             self.config.description.clone(),
         );
 
@@ -242,7 +242,6 @@ mod tests {
     use super::*;
     use crate::storage::StorageBuilder;
     use std::io::ErrorKind;
-    use tempfile::tempdir;
     use tokio::net::TcpListener;
 
     #[test]
@@ -273,9 +272,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_collector_success() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("tcp_success.db");
-
         // Start a mock TCP listener on a random port
         let listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(l) => l,
@@ -294,7 +290,10 @@ mod tests {
             }
         });
 
-        let handles = StorageBuilder::new(&db_path).build().unwrap();
+        let handles = StorageBuilder::new("sqlite::memory:")
+            .build()
+            .await
+            .unwrap();
         let config = TcpConfig::new("test-success", addr.ip().to_string(), addr.port())
             .with_timeout(Duration::from_secs(1));
         let collector = TcpCollector::new(config, handles.writer.clone());
@@ -310,17 +309,17 @@ mod tests {
             "collect() should succeed for reachable target"
         );
 
-        handles.shutdown().unwrap();
+        handles.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_tcp_collector_connection_refused() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("tcp_refused.db");
-
         // Use a port that is very likely to be unused (no listener)
 
-        let handles = StorageBuilder::new(&db_path).build().unwrap();
+        let handles = StorageBuilder::new("sqlite::memory:")
+            .build()
+            .await
+            .unwrap();
         let config = TcpConfig::new("test-refused", "127.0.0.1", 59999)
             .with_timeout(Duration::from_millis(500));
         let collector = TcpCollector::new(config, handles.writer.clone());
@@ -335,18 +334,18 @@ mod tests {
             "collect() should succeed even when connection is refused"
         );
 
-        handles.shutdown().unwrap();
+        handles.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_tcp_collector_timeout() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("tcp_timeout.db");
-
         // Use a non-routable IP (10.255.255.1) which will cause connection to hang/timeout
         // This simulates network timeout better than connection refused
 
-        let handles = StorageBuilder::new(&db_path).build().unwrap();
+        let handles = StorageBuilder::new("sqlite::memory:")
+            .build()
+            .await
+            .unwrap();
         let config = TcpConfig::new("test-timeout", "10.255.255.1", 80)
             .with_timeout(Duration::from_millis(100));
         let collector = TcpCollector::new(config, handles.writer.clone());
@@ -361,6 +360,6 @@ mod tests {
             "collect() should succeed even when connection times out"
         );
 
-        handles.shutdown().unwrap();
+        handles.shutdown().await.unwrap();
     }
 }

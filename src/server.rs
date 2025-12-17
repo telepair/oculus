@@ -121,6 +121,12 @@ impl EventsTemplate {}
 #[template(path = "partials/collectors.html")]
 struct CollectorsTemplate {
     collectors: Vec<CollectorRecord>,
+    page: u32,
+    page_size: u32,
+    total_count: u64,
+    total_pages: u32,
+    /// Number of collectors in current page (for template convenience)
+    count: u32,
 }
 
 impl CollectorsTemplate {
@@ -168,7 +174,7 @@ pub fn create_router(state: AppState) -> Router {
             get(list_collectors_handler).post(create_collector_handler),
         )
         .route(
-            "/api/collectors/{type}/{name}",
+            "/api/collectors/:type/:name",
             get(get_collector_handler)
                 .put(update_collector_handler)
                 .delete(delete_collector_handler),
@@ -195,7 +201,7 @@ async fn healthz_handler() -> Json<HealthResponse> {
     })
 }
 
-/// Readiness probe that checks DuckDB availability.
+/// Readiness probe that checks SQLite availability.
 async fn readyz_handler(State(state): State<Arc<AppState>>) -> Response {
     let db_status = state
         .metric_reader
@@ -203,6 +209,7 @@ async fn readyz_handler(State(state): State<Arc<AppState>>) -> Response {
             limit: Some(1),
             ..Default::default()
         })
+        .await
         .map(|_| "ready".to_string())
         .map_err(|e| e.to_string());
 
@@ -246,7 +253,7 @@ async fn metrics_handler(
         order: parse_sort_order(params.order),
     };
 
-    match state.metric_reader.query(query) {
+    match state.metric_reader.query(query).await {
         Ok(metrics) => HtmlTemplate(MetricsTemplate { metrics }).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to query metrics");
@@ -265,7 +272,7 @@ async fn metrics_stats_handler(
     Query(params): Query<StatsQueryParams>,
 ) -> Response {
     let start = parse_range(params.range);
-    match state.metric_reader.stats(start, None) {
+    match state.metric_reader.stats(start, None).await {
         Ok(stats) => Json(stats).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to query metrics stats");
@@ -300,7 +307,7 @@ async fn events_handler(
         order: parse_sort_order(params.order),
     };
 
-    match state.event_reader.query(query) {
+    match state.event_reader.query(query).await {
         Ok(events) => HtmlTemplate(EventsTemplate { events }).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to query events");
@@ -351,10 +358,45 @@ pub struct CollectorPath {
     pub name: String,
 }
 
+/// Query parameters for collector pagination.
+#[derive(Debug, Deserialize)]
+struct CollectorsPaginationQuery {
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_page_size")]
+    page_size: u32,
+}
+
+fn default_page() -> u32 {
+    1
+}
+
+fn default_page_size() -> u32 {
+    20
+}
+
 /// Collectors API endpoint - returns HTML partial for HTMX.
-async fn collectors_html_handler(State(state): State<Arc<AppState>>) -> Response {
-    match state.collector_store.list_all() {
-        Ok(collectors) => HtmlTemplate(CollectorsTemplate { collectors }).into_response(),
+async fn collectors_html_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CollectorsPaginationQuery>,
+) -> Response {
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, 100);
+
+    match state.collector_store.list_paginated(page, page_size).await {
+        Ok((collectors, total_count)) => {
+            let total_pages = ((total_count as f64) / (page_size as f64)).ceil() as u32;
+            let count = collectors.len() as u32;
+            HtmlTemplate(CollectorsTemplate {
+                collectors,
+                page,
+                page_size,
+                total_count,
+                total_pages,
+                count,
+            })
+            .into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to list collectors");
             (
@@ -368,7 +410,7 @@ async fn collectors_html_handler(State(state): State<Arc<AppState>>) -> Response
 
 /// List all collectors.
 async fn list_collectors_handler(State(state): State<Arc<AppState>>) -> Response {
-    match state.collector_store.list_all() {
+    match state.collector_store.list_all().await {
         Ok(collectors) => Json(collectors).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to list collectors");
@@ -387,7 +429,11 @@ async fn get_collector_handler(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid collector type").into_response(),
     };
 
-    match state.collector_store.get(collector_type, &params.name) {
+    match state
+        .collector_store
+        .get(collector_type, &params.name)
+        .await
+    {
         Ok(Some(collector)) => Json(collector).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "Collector not found").into_response(),
         Err(e) => {
@@ -408,7 +454,7 @@ async fn create_collector_handler(
     };
 
     // Check if collector already exists
-    if let Ok(Some(_)) = state.collector_store.get(collector_type, &req.name) {
+    if let Ok(Some(_)) = state.collector_store.get(collector_type, &req.name).await {
         return (StatusCode::CONFLICT, "Collector already exists").into_response();
     }
 
@@ -420,7 +466,7 @@ async fn create_collector_handler(
         req.config,
     );
 
-    match state.collector_store.upsert(&record) {
+    match state.collector_store.upsert(&record).await {
         Ok(id) => {
             tracing::info!(id = id, name = %req.name, "Created collector");
             (StatusCode::CREATED, Json(record)).into_response()
@@ -444,7 +490,11 @@ async fn update_collector_handler(
     };
 
     // Check if collector exists
-    let existing = match state.collector_store.get(collector_type, &params.name) {
+    let existing = match state
+        .collector_store
+        .get(collector_type, &params.name)
+        .await
+    {
         Ok(Some(c)) => c,
         Ok(None) => return (StatusCode::NOT_FOUND, "Collector not found").into_response(),
         Err(e) => {
@@ -470,7 +520,7 @@ async fn update_collector_handler(
         req.config,
     );
 
-    match state.collector_store.upsert(&record) {
+    match state.collector_store.upsert(&record).await {
         Ok(_) => {
             tracing::info!(name = %params.name, "Updated collector");
             Json(record).into_response()
@@ -493,7 +543,11 @@ async fn delete_collector_handler(
     };
 
     // Check if collector exists and is API-created
-    let existing = match state.collector_store.get(collector_type, &params.name) {
+    let existing = match state
+        .collector_store
+        .get(collector_type, &params.name)
+        .await
+    {
         Ok(Some(c)) => c,
         Ok(None) => return (StatusCode::NOT_FOUND, "Collector not found").into_response(),
         Err(e) => {
@@ -510,7 +564,11 @@ async fn delete_collector_handler(
             .into_response();
     }
 
-    match state.collector_store.delete(collector_type, &params.name) {
+    match state
+        .collector_store
+        .delete(collector_type, &params.name)
+        .await
+    {
         Ok(true) => {
             tracing::info!(name = %params.name, "Deleted collector");
             StatusCode::NO_CONTENT.into_response()
@@ -528,21 +586,14 @@ mod tests {
     use super::*;
     use crate::storage::StorageBuilder;
     use axum::http::Request;
-    use tempfile::{TempDir, tempdir};
     use tower::ServiceExt;
 
-    fn create_test_state() -> (AppState, crate::storage::StorageHandles, TempDir) {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_server.db");
-
-        let handles = StorageBuilder::new(&db_path)
-            .pool_size(2)
+    async fn create_test_state() -> (AppState, crate::storage::StorageHandles) {
+        let handles = StorageBuilder::new("sqlite::memory:")
             .channel_capacity(100)
             .build()
+            .await
             .expect("Failed to build storage");
-
-        // Checkpoint to ensure schema is visible to readers
-        handles.admin.checkpoint().expect("Failed to checkpoint");
 
         let state = AppState {
             metric_reader: handles.metric_reader.clone(),
@@ -550,13 +601,12 @@ mod tests {
             collector_store: handles.collector_store.clone(),
         };
 
-        // Return handles AND dir to keep tempdir alive
-        (state, handles, dir)
+        (state, handles)
     }
 
     #[tokio::test]
     async fn test_metrics_endpoint() {
-        let (state, _handles, _dir) = create_test_state();
+        let (state, _handles) = create_test_state().await;
         let app = create_router(state);
 
         let response = app
@@ -580,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_events_endpoint() {
-        let (state, _handles, _dir) = create_test_state();
+        let (state, _handles) = create_test_state().await;
         let app = create_router(state);
 
         let response = app

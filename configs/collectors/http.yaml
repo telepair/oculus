@@ -1,0 +1,31 @@
+# HTTP Endpoint Probe Collectors
+#
+# These collectors probe HTTP(S) endpoints to check availability,
+# response status, and measure request latency.
+
+http:
+  # Google homepage health check
+  - name: google-health
+    url: https://www.google.com
+    enabled: true
+    group: production
+    method: GET
+    expected_status: 200
+    interval: 30s
+    timeout: 10s
+    tags:
+      env: production
+      service: external
+    description: "Google homepage health check"
+
+  # Example: API with custom headers
+  # - name: api-health
+  #   url: https://api.example.com/health
+  #   enabled: true
+  #   group: production
+  #   method: GET
+  #   expected_status: 200
+  #   interval: 60s
+  #   timeout: 10s
+  #   headers:
+  #     Authorization: "Bearer ${API_TOKEN:-default-token}"

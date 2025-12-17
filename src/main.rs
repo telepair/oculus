@@ -9,9 +9,12 @@ use oculus::{
     collector::http::HttpCollector,
     collector::ping::PingCollector,
     collector::tcp::TcpCollector,
-    config::{AppConfig, parse_duration},
+    config::{AppConfig, CollectorsConfig},
     server::{AppState, create_router},
-    storage::{Event, EventKind, EventSeverity, EventSource, StorageBuilder},
+    storage::{
+        CollectorRecord, CollectorType, Event, EventKind, EventSeverity, EventSource,
+        StorageBuilder,
+    },
 };
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -37,13 +40,9 @@ struct Cli {
     #[arg(long, env = "OCULUS_SERVER_PORT")]
     server_port: Option<u16>,
 
-    /// Database path (overrides config file)
-    #[arg(long, env = "OCULUS_DB_PATH")]
-    db_path: Option<String>,
-
-    /// Database pool size (overrides config file)
-    #[arg(long, env = "OCULUS_DB_POOL_SIZE")]
-    db_pool_size: Option<u32>,
+    /// Database URL (overrides config file)
+    #[arg(long, env = "OCULUS_DB_URL")]
+    db_url: Option<String>,
 }
 
 #[tokio::main]
@@ -62,9 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Load configuration from file (including collector_path directory if specified)
+    // Load configuration from file
     tracing::info!("Loading configuration from: {}", cli.config);
-    let mut config = AppConfig::load_with_collector_path(&cli.config)?;
+    let mut config = AppConfig::load(&cli.config)?;
 
     // Apply CLI/env overrides (CLI > ENV > config file)
     if let Some(bind) = cli.server_bind {
@@ -73,33 +72,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(port) = cli.server_port {
         config.server.port = port;
     }
-    if let Some(path) = cli.db_path {
-        config.database.path = path;
-    }
-    if let Some(pool_size) = cli.db_pool_size {
-        config.database.pool_size = pool_size;
+    if let Some(dsn) = cli.db_url {
+        config.database.dsn = dsn;
     }
 
     tracing::info!(
-        "Server: {}:{}, Database: {}, Collectors: {} tcp, {} ping, {} http",
+        "Server: {}:{}, Database: {} ({})",
         config.server.bind,
         config.server.port,
-        config.database.path,
-        config.collectors.tcp.len(),
-        config.collectors.ping.len(),
-        config.collectors.http.len(),
+        config.database.dsn,
+        config.database.driver,
     );
 
     // Build storage layer
-    tracing::info!("Initializing storage...");
-    let checkpoint_interval = parse_duration(&config.database.checkpoint_interval)?;
-    let handles = StorageBuilder::new(&config.database.path)
-        .pool_size(config.database.pool_size)
-        .channel_capacity(config.database.channel_capacity)
-        .checkpoint_interval(checkpoint_interval)
-        .build()?;
+    let db_url = config.database.connection_url();
+    tracing::info!("Initializing storage at: {}", db_url);
 
-    tracing::info!("Storage initialized at: {}", config.database.path);
+    let handles = StorageBuilder::new(&db_url)
+        .channel_capacity(config.database.channel_capacity)
+        .build()
+        .await?;
+
+    tracing::info!("Storage initialized");
+
+    // Sync collectors from include directory to database (insert only, no updates)
+    if let Some(ref include_path) = config.collector_include {
+        tracing::info!("Loading collectors from: {}", include_path);
+        let collectors_config = CollectorsConfig::load_from_dir(include_path)?;
+        collectors_config.validate()?;
+
+        let records = collectors_config.to_collector_records();
+        let mut inserted = 0;
+        let mut skipped = 0;
+
+        for record in &records {
+            match handles.collector_store.insert_if_not_exists(record).await? {
+                Some(id) => {
+                    tracing::info!(
+                        "Synced collector: {} ({}, id={})",
+                        record.name,
+                        record.collector_type.as_ref(),
+                        id
+                    );
+                    inserted += 1;
+                }
+                None => {
+                    tracing::debug!(
+                        "Collector already exists, skipping: {} ({})",
+                        record.name,
+                        record.collector_type.as_ref()
+                    );
+                    skipped += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            "Collector sync complete: {} inserted, {} skipped",
+            inserted,
+            skipped
+        );
+    }
 
     // Initialize collector registry
     tracing::info!("Starting collector registry...");
@@ -116,80 +149,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("Failed to emit service start event: {}", e);
     }
 
-    // Spawn TCP collectors
-    for tcp_config in &config.collectors.tcp {
-        if !tcp_config.enabled {
+    // Load and spawn collectors from database
+    let db_collectors = handles.collector_store.list_all().await?;
+    tracing::info!("Found {} collectors in database", db_collectors.len());
+
+    for record in db_collectors {
+        if !record.enabled {
             tracing::debug!(
-                "Skipping disabled collector: {} (tcp, group={})",
-                tcp_config.name,
-                tcp_config.group,
+                "Skipping disabled collector: {} ({})",
+                record.name,
+                record.collector_type.as_ref()
             );
             continue;
         }
 
-        let collector = TcpCollector::new(tcp_config.clone(), handles.writer.clone());
-        registry
-            .spawn(collector)
-            .await
-            .map_err(|e| format!("Failed to spawn collector '{}': {}", tcp_config.name, e))?;
-
-        tracing::info!(
-            "Spawned collector: {} (tcp, host={}:{}, group={})",
-            tcp_config.name,
-            tcp_config.host,
-            tcp_config.port,
-            tcp_config.group,
-        );
-    }
-
-    // Spawn ping collectors
-    for ping_config in &config.collectors.ping {
-        if !ping_config.enabled {
-            tracing::debug!(
-                "Skipping disabled collector: {} (ping, group={})",
-                ping_config.name,
-                ping_config.group,
-            );
-            continue;
+        match spawn_collector(&record, &handles.writer, &registry).await {
+            Ok(()) => {
+                tracing::info!(
+                    "Spawned collector: {} ({})",
+                    record.name,
+                    record.collector_type.as_ref()
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn collector '{}': {}", record.name, e);
+            }
         }
-
-        let collector = PingCollector::new(ping_config.clone(), handles.writer.clone());
-        registry
-            .spawn(collector)
-            .await
-            .map_err(|e| format!("Failed to spawn collector '{}': {}", ping_config.name, e))?;
-
-        tracing::info!(
-            "Spawned collector: {} (ping, host={}, group={})",
-            ping_config.name,
-            ping_config.host,
-            ping_config.group,
-        );
-    }
-
-    // Spawn HTTP collectors
-    for http_config in &config.collectors.http {
-        if !http_config.enabled {
-            tracing::debug!(
-                "Skipping disabled collector: {} (http, group={})",
-                http_config.name,
-                http_config.group,
-            );
-            continue;
-        }
-
-        let collector = HttpCollector::new(http_config.clone(), handles.writer.clone());
-        registry
-            .spawn(collector)
-            .await
-            .map_err(|e| format!("Failed to spawn collector '{}': {}", http_config.name, e))?;
-
-        tracing::info!(
-            "Spawned collector: {} (http, url={}, group={})",
-            http_config.name,
-            http_config.url,
-            http_config.group,
-        );
     }
 
     // Create web server state
@@ -216,6 +201,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     tracing::info!("Shutdown complete");
+    Ok(())
+}
+
+/// Spawn a collector from a database record.
+async fn spawn_collector(
+    record: &CollectorRecord,
+    writer: &oculus::StorageWriter,
+    registry: &CollectorRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match record.collector_type {
+        CollectorType::Tcp => {
+            let config: oculus::TcpConfig = serde_json::from_value(record.config.clone())?;
+            let collector = TcpCollector::new(config, writer.clone());
+            registry.spawn(collector).await?;
+        }
+        CollectorType::Ping => {
+            let config: oculus::PingConfig = serde_json::from_value(record.config.clone())?;
+            let collector = PingCollector::new(config, writer.clone());
+            registry.spawn(collector).await?;
+        }
+        CollectorType::Http => {
+            let config: oculus::collector::http::HttpConfig =
+                serde_json::from_value(record.config.clone())?;
+            let collector = HttpCollector::new(config, writer.clone())?;
+            registry.spawn(collector).await?;
+        }
+    }
     Ok(())
 }
 
@@ -263,7 +275,7 @@ async fn shutdown_signal(registry: CollectorRegistry, handles: oculus::StorageHa
     }
 
     tracing::info!("Shutting down storage...");
-    if let Err(e) = handles.shutdown() {
+    if let Err(e) = handles.shutdown().await {
         tracing::error!("Failed to shutdown storage: {}", e);
     }
 }

@@ -187,8 +187,8 @@ impl HttpConfig {
     }
 
     /// Get static tags as StaticTags type.
-    pub fn static_tags(&self) -> StaticTags {
-        self.tags.clone()
+    pub fn static_tags(&self) -> &StaticTags {
+        &self.tags
     }
 
     /// Get schedule from interval or cron.
@@ -308,26 +308,29 @@ pub struct HttpCollector {
 
 impl HttpCollector {
     /// Create a new HTTP collector with the given configuration and writer.
-    pub fn new(config: HttpConfig, writer: StorageWriter) -> Self {
+    ///
+    /// # Errors
+    /// Returns `CollectorError::Config` if the HTTP client cannot be built.
+    pub fn new(config: HttpConfig, writer: StorageWriter) -> Result<Self, CollectorError> {
         let series_id = MetricSeries::compute_series_id(
             MetricCategory::NetworkHttp,
             &config.name,
             &config.url,
-            &config.static_tags(),
+            config.static_tags(),
         );
 
         // Build HTTP client with timeout
         let client = Client::builder()
             .timeout(config.timeout)
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| CollectorError::Config(format!("Failed to build HTTP client: {}", e)))?;
 
-        Self {
+        Ok(Self {
             config,
             writer,
             series_id,
             client,
-        }
+        })
     }
 }
 
@@ -360,7 +363,7 @@ impl Collector for HttpCollector {
             MetricCategory::NetworkHttp,
             self.config.name.clone(),
             self.config.url.clone(),
-            self.config.static_tags(),
+            self.config.static_tags().clone(),
             self.config.description.clone(),
         );
 

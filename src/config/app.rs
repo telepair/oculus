@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{CollectorRecord, CollectorType};
-
-use super::collector::CollectorsConfig;
-use super::validation::{ConfigError, parse_duration};
+use super::validation::ConfigError;
 
 // =============================================================================
 // Constants
@@ -18,35 +15,11 @@ use super::validation::{ConfigError, parse_duration};
 /// Default collection interval (30 seconds).
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Default connection pool size.
-pub const DEFAULT_POOL_SIZE: u32 = 4;
-
 /// Default channel capacity.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 
-/// Default checkpoint interval (5 seconds).
-pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Default collector sync interval (10 seconds).
-pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Minimum collector sync interval (1 second).
-pub const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(1);
-
-fn default_pool_size() -> u32 {
-    DEFAULT_POOL_SIZE
-}
-
 fn default_channel_capacity() -> usize {
     DEFAULT_CHANNEL_CAPACITY
-}
-
-fn default_checkpoint_interval() -> String {
-    "5s".to_string()
-}
-
-fn default_sync_interval() -> Duration {
-    DEFAULT_SYNC_INTERVAL
 }
 
 // =============================================================================
@@ -77,32 +50,78 @@ impl Default for ServerConfig {
 // Database Configuration
 // =============================================================================
 
+/// Supported database drivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseDriver {
+    /// SQLite database (embedded).
+    #[default]
+    Sqlite,
+    /// PostgreSQL database.
+    #[serde(alias = "pg", alias = "postgres")]
+    Postgresql,
+}
+
+impl std::fmt::Display for DatabaseDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatabaseDriver::Sqlite => write!(f, "sqlite"),
+            DatabaseDriver::Postgresql => write!(f, "postgresql"),
+        }
+    }
+}
+
 /// Database configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// Database file path.
-    pub path: String,
+    /// Database driver type (sqlite or postgresql).
+    #[serde(default)]
+    pub driver: DatabaseDriver,
 
-    /// Connection pool size for read operations (default: 4).
-    #[serde(default = "default_pool_size")]
-    pub pool_size: u32,
+    /// Database connection DSN (Data Source Name).
+    ///
+    /// For SQLite: `sqlite:data/oculus.db?mode=rwc` or just `data/oculus.db`
+    /// For PostgreSQL: `postgres://user:pass@host:5432/dbname`
+    pub dsn: String,
 
     /// MPSC channel capacity for write operations (default: 10000).
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
-
-    /// WAL checkpoint interval (default: "5s").
-    #[serde(default = "default_checkpoint_interval")]
-    pub checkpoint_interval: String,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            path: "oculus.db".to_string(),
-            pool_size: DEFAULT_POOL_SIZE,
+            driver: DatabaseDriver::default(),
+            dsn: "sqlite:oculus.db?mode=rwc".to_string(),
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
-            checkpoint_interval: "5s".to_string(),
+        }
+    }
+}
+
+impl DatabaseConfig {
+    /// Get the full database connection URL with proper prefix.
+    ///
+    /// For SQLite, ensures the URL has the `sqlite:` prefix and `?mode=rwc` suffix.
+    /// For PostgreSQL, returns the URL as-is.
+    pub fn connection_url(&self) -> String {
+        match self.driver {
+            DatabaseDriver::Sqlite => {
+                let dsn = self.dsn.trim();
+                // If already has sqlite: prefix, return as-is
+                if dsn.starts_with("sqlite:") {
+                    dsn.to_string()
+                } else {
+                    // Add prefix and mode=rwc if not present
+                    let base = format!("sqlite:{}", dsn);
+                    if base.contains('?') {
+                        base
+                    } else {
+                        format!("{}?mode=rwc", base)
+                    }
+                }
+            }
+            DatabaseDriver::Postgresql => self.dsn.clone(),
         }
     }
 }
@@ -120,17 +139,10 @@ pub struct AppConfig {
     /// Database configuration.
     pub database: DatabaseConfig,
 
-    /// Collector configurations grouped by type.
+    /// Path to a directory with collector config files (include directory).
+    /// Collectors from this directory are synced to database on startup.
     #[serde(default)]
-    pub collectors: CollectorsConfig,
-
-    /// Path to a directory with additional collector config files.
-    #[serde(default)]
-    pub collector_path: Option<String>,
-
-    /// Collector sync interval (default: 10s, minimum: 1s).
-    #[serde(default = "default_sync_interval", with = "humantime_serde")]
-    pub collector_sync_interval: Duration,
+    pub collector_include: Option<String>,
 }
 
 impl AppConfig {
@@ -165,13 +177,6 @@ impl AppConfig {
             ));
         }
 
-        // Validate database pool size
-        if self.database.pool_size == 0 {
-            return Err(ConfigError::ValidationError(
-                "database pool_size must be positive".to_string(),
-            ));
-        }
-
         // Validate channel capacity
         if self.database.channel_capacity == 0 {
             return Err(ConfigError::ValidationError(
@@ -179,78 +184,30 @@ impl AppConfig {
             ));
         }
 
-        // Validate checkpoint interval
-        parse_duration(&self.database.checkpoint_interval).map_err(|e| {
-            ConfigError::ValidationError(format!("database checkpoint_interval: {}", e))
-        })?;
-
-        // Validate collectors
-        self.collectors.validate()?;
+        // Validate collector_include path exists if specified
+        if let Some(ref path) = self.collector_include {
+            let p = Path::new(path);
+            if !p.exists() {
+                return Err(ConfigError::ValidationError(format!(
+                    "collector_include path '{}' does not exist",
+                    path
+                )));
+            }
+            if !p.is_dir() {
+                return Err(ConfigError::ValidationError(format!(
+                    "collector_include path '{}' is not a directory",
+                    path
+                )));
+            }
+        }
 
         Ok(())
-    }
-
-    /// Load configuration including collector_path directory.
-    ///
-    /// If `collector_path` is specified, scans the directory for YAML files
-    /// and merges their collector configurations.
-    pub fn load_with_collector_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let mut config = Self::load(path)?;
-
-        if let Some(ref collector_dir) = config.collector_path {
-            let additional = CollectorsConfig::load_from_dir(collector_dir)?;
-            config.collectors = config.collectors.merge(additional);
-        }
-
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Convert collectors config to CollectorRecords for database sync.
-    pub fn to_collector_records(&self) -> Vec<CollectorRecord> {
-        let mut records = Vec::new();
-
-        for tcp in &self.collectors.tcp {
-            let config_json = serde_json::to_value(tcp).unwrap_or_default();
-            records.push(CollectorRecord::from_config(
-                CollectorType::Tcp,
-                &tcp.name,
-                tcp.enabled,
-                &tcp.group,
-                config_json,
-            ));
-        }
-
-        for ping in &self.collectors.ping {
-            let config_json = serde_json::to_value(ping).unwrap_or_default();
-            records.push(CollectorRecord::from_config(
-                CollectorType::Ping,
-                &ping.name,
-                ping.enabled,
-                &ping.group,
-                config_json,
-            ));
-        }
-
-        for http in &self.collectors.http {
-            let config_json = serde_json::to_value(http).unwrap_or_default();
-            records.push(CollectorRecord::from_config(
-                CollectorType::Http,
-                &http.name,
-                http.enabled,
-                &http.group,
-                config_json,
-            ));
-        }
-
-        records
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collector::tcp::TcpConfig;
 
     #[test]
     fn test_server_config_default() {
@@ -262,10 +219,9 @@ mod tests {
     #[test]
     fn test_database_config_default() {
         let config = DatabaseConfig::default();
-        assert_eq!(config.path, "oculus.db");
-        assert_eq!(config.pool_size, DEFAULT_POOL_SIZE);
+        assert_eq!(config.driver, DatabaseDriver::Sqlite);
+        assert_eq!(config.dsn, "sqlite:oculus.db?mode=rwc");
         assert_eq!(config.channel_capacity, DEFAULT_CHANNEL_CAPACITY);
-        assert_eq!(config.checkpoint_interval, "5s");
     }
 
     #[test]
@@ -276,18 +232,11 @@ mod tests {
                 port: 8080,
             },
             database: DatabaseConfig {
-                path: "./test.db".to_string(),
-                pool_size: 4,
+                driver: DatabaseDriver::Sqlite,
+                dsn: "./test.db".to_string(),
                 channel_capacity: 1000,
-                checkpoint_interval: "5s".to_string(),
             },
-            collectors: CollectorsConfig {
-                tcp: vec![TcpConfig::new("test-probe", "127.0.0.1", 6379)],
-                ping: vec![],
-                http: vec![],
-            },
-            collector_path: None,
-            collector_sync_interval: DEFAULT_SYNC_INTERVAL,
+            collector_include: None,
         };
 
         assert!(config.validate().is_ok());
@@ -301,9 +250,7 @@ mod tests {
                 port: 0,
             },
             database: DatabaseConfig::default(),
-            collectors: CollectorsConfig::default(),
-            collector_path: None,
-            collector_sync_interval: DEFAULT_SYNC_INTERVAL,
+            collector_include: None,
         };
 
         assert!(config.validate().is_err());
@@ -317,9 +264,7 @@ mod tests {
                 port: 8080,
             },
             database: DatabaseConfig::default(),
-            collectors: CollectorsConfig::default(),
-            collector_path: None,
-            collector_sync_interval: DEFAULT_SYNC_INTERVAL,
+            collector_include: None,
         };
 
         let result = config.validate();
@@ -329,6 +274,58 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid server bind address")
+        );
+    }
+
+    #[test]
+    fn test_database_driver_display() {
+        assert_eq!(DatabaseDriver::Sqlite.to_string(), "sqlite");
+        assert_eq!(DatabaseDriver::Postgresql.to_string(), "postgresql");
+    }
+
+    #[test]
+    fn test_connection_url_sqlite_plain_path() {
+        let config = DatabaseConfig {
+            driver: DatabaseDriver::Sqlite,
+            dsn: "data/oculus.db".to_string(),
+            channel_capacity: 1000,
+        };
+        assert_eq!(config.connection_url(), "sqlite:data/oculus.db?mode=rwc");
+    }
+
+    #[test]
+    fn test_connection_url_sqlite_with_prefix() {
+        let config = DatabaseConfig {
+            driver: DatabaseDriver::Sqlite,
+            dsn: "sqlite:data/oculus.db?mode=rwc".to_string(),
+            channel_capacity: 1000,
+        };
+        // Should not double-prefix
+        assert_eq!(config.connection_url(), "sqlite:data/oculus.db?mode=rwc");
+    }
+
+    #[test]
+    fn test_connection_url_sqlite_with_query() {
+        let config = DatabaseConfig {
+            driver: DatabaseDriver::Sqlite,
+            dsn: "data/oculus.db?mode=rw".to_string(),
+            channel_capacity: 1000,
+        };
+        // Should not add mode=rwc if query already exists
+        assert_eq!(config.connection_url(), "sqlite:data/oculus.db?mode=rw");
+    }
+
+    #[test]
+    fn test_connection_url_postgresql() {
+        let config = DatabaseConfig {
+            driver: DatabaseDriver::Postgresql,
+            dsn: "postgres://user:pass@localhost:5432/oculus".to_string(),
+            channel_capacity: 1000,
+        };
+        // PostgreSQL URLs should pass through as-is
+        assert_eq!(
+            config.connection_url(),
+            "postgres://user:pass@localhost:5432/oculus"
         );
     }
 }

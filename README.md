@@ -8,14 +8,13 @@ Value Monitoring • Single Binary • Zero Dependencies
 
 Oculus is an out-of-the-box value monitoring software designed for individuals and small teams. Written in Rust, single binary, zero external dependencies.
 
-> - ⚠️ **Status**: v0.1.2 - Under active development
+> - ⚠️ **Status**: v0.1.3 - Under active development
 > - 🛑 **Scope Note**: v0.1.x is single-user; no user/account/role management.
 
 ## Features
 
 - 🚀 **Zero Dependencies** - Single binary, runs anywhere
 - 📊 **Unified Value Monitoring** - Crypto, stocks, prediction markets, network metrics in one place
-- ⚡ **High Performance** - Rust + DuckDB for low latency and minimal resource usage
 - 🌐 **No-Build Web UI** - HTMX-powered dashboard, no JavaScript build step
 - 🔔 **Rule Engine** - Calculate derived values, trigger alerts with YAML configs and raw SQL
 - 📬 **Multi-Channel Notifications** - Log, Email, Telegram, Discord, Slack, Webhook
@@ -37,7 +36,7 @@ Oculus is an out-of-the-box value monitoring software designed for individuals a
 ## Architecture
 
 ```text
-Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Notifications/Actions
+Collectors  →  MPSC Channel  →  SQLite/PostgreSQL →  Rule Engine  →  Notifications/Actions
     │                              │              │                    │
     ├─ Crypto Prices               └─ Single      ├─ Simple Rules      ├─ Log
     ├─ Stock Prices                    Writer        (YAML/TOML)       ├─ Email
@@ -52,15 +51,15 @@ Collectors  →  MPSC Channel  →  DuckDB  →  Rule Engine  →  Notifications
 
 ## Tech Stack
 
-| Layer         | Technology   | Purpose                         |
-| ------------- | ------------ | ------------------------------- |
-| Language      | Rust 2024    | Memory safety, zero GC pause    |
-| Async Runtime | Tokio        | High-concurrency I/O            |
-| Web Framework | Axum         | Lightweight, Tokio-native       |
-| Database      | DuckDB       | Embedded OLAP, columnar storage |
-| Frontend      | HTMX         | AJAX via HTML attributes        |
-| Templating    | Askama       | Type-safe, compiled templates   |
-| Styling       | Tailwind CSS | Bundled, offline-first          |
+| Layer         | Technology   | Purpose                        |
+| ------------- | ------------ | ------------------------------ |
+| Language      | Rust 2024    | Memory safety, zero GC pause   |
+| Async Runtime | Tokio        | High-concurrency I/O           |
+| Web Framework | Axum         | Lightweight, Tokio-native      |
+| Database      | SQLite       | Embedded database, single file |
+| Frontend      | HTMX         | AJAX via HTML attributes       |
+| Templating    | Askama       | Type-safe, compiled templates  |
+| Styling       | Tailwind CSS | Bundled, offline-first         |
 
 ## Quick Start
 
@@ -112,13 +111,9 @@ server:
   port: 8080
 
 database:
-  path: data/oculus.db
-  pool_size: 4
+  driver: sqlite
+  dsn: data/oculus.db
   channel_capacity: 10000
-  checkpoint_interval: 5s
-
-# Collector sync interval for dynamic management (default: 10s, min: 1s)
-collector_sync_interval: 10s
 
 collectors:
   tcp:
@@ -160,15 +155,16 @@ collectors:
 
 ## API Endpoints
 
-| Endpoint       | Method | Description                 |
-| -------------- | ------ | --------------------------- |
-| `/`            | GET    | Dashboard homepage          |
-| `/api/metrics` | GET    | List metrics with filters   |
-| `/api/query`   | POST   | Execute read-only SQL query |
-| `/api/rules`   | GET    | List configured rules       |
-| `/api/alerts`  | GET    | List recent alerts          |
-| `/healthz`     | GET    | Health check (process up)   |
-| `/readyz`      | GET    | Readiness check (DB ready)  |
+| Endpoint             | Method | Description                 |
+| -------------------- | ------ | --------------------------- |
+| `/`                  | GET    | Dashboard homepage          |
+| `/api/metrics`       | GET    | List metrics with filters   |
+| `/api/metrics/stats` | GET    | Get aggregated metric stats |
+| `/api/events`        | GET    | List events with filters    |
+| `/api/collectors`    | GET    | List configured collectors  |
+| `/api/query`         | POST   | Execute read-only SQL query |
+| `/healthz`           | GET    | Health check (process up)   |
+| `/readyz`            | GET    | Readiness check (DB ready)  |
 
 ## Project Structure
 
@@ -220,7 +216,7 @@ cargo run --bin oculus
 
 ## TODO
 
-> v0.1.2 milestone tasks based on [PRD](docs/PRD.md)
+> v0.1.3 milestone tasks based on [PRD](docs/PRD.md)
 
 ### Collector Layer
 
@@ -235,9 +231,11 @@ cargo run --bin oculus
 
 ### Storage Layer
 
-- [x] DuckDB integration with single-writer actor model
+- [x] SQLite for single-node support
+- [ ] PostgreSQL for multi-node support
 - [x] `metrics` table schema and migrations
 - [x] `events` table for alerts/audit
+- [x] `collectors` table for collector configuration
 - [x] Data retention and cleanup policy (configurable window)
 
 ### Rule Engine

@@ -1,0 +1,27 @@
+# ICMP Ping Probe Collectors
+#
+# These collectors use ICMP ping to check host reachability
+# and measure network latency.
+
+ping:
+  # Google DNS ping
+  - name: google-dns-ping
+    host: 8.8.8.8
+    enabled: true
+    group: production
+    interval: 30s
+    timeout: 3s
+    tags:
+      env: production
+      service: external
+
+  # Cloudflare DNS ping
+  - name: cloudflare-dns-ping
+    host: 1.1.1.1
+    enabled: true
+    group: production
+    interval: 30s
+    timeout: 3s
+    tags:
+      env: production
+      service: external

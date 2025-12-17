@@ -1,0 +1,27 @@
+# TCP Port Probe Collectors
+#
+# These collectors probe TCP ports to check service availability
+# and measure connection latency.
+
+tcp:
+  # Google DNS TCP probe
+  - name: google-dns
+    host: 8.8.8.8
+    port: 53
+    enabled: true
+    group: production
+    interval: 5s
+    timeout: 5s
+    tags:
+      env: production
+      service: external
+    description: "Google Public DNS TCP probe"
+
+  # Example: Redis probe (disabled by default)
+  # - name: redis-local
+  #   host: 127.0.0.1
+  #   port: 6379
+  #   enabled: true
+  #   group: local
+  #   interval: 10s
+  #   timeout: 2s
